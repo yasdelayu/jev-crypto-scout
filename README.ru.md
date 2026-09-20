@@ -38,20 +38,28 @@ Jev используется только там, где нужна именно
 | `scout.py` | Топ-N монет по капитализации: моментум, дистанция от ATH, vol/mcap, возраст монеты, осцилляторы, новости через Jev |
 | `scalp.py` | Короткогоризонтный **сканер сигналов** (не исполнитель) — экстремальность фандинга + минутные осцилляторы на Bybit, Jev — вето по новостному риску |
 | `indicators.py` | RSI / MACD-гистограмма / %B Боллинджера / Stochastic %K — чистый Python, без TA-Lib |
+| `colors.py` | ANSI-цвета терминала, сами выключаются вне TTY — без зависимостей |
 | `jev_client.py` | Один клиент на три провайдера Jev (нативный TypeSafe / Vercel AI Gateway / Cloudflare Workers AI) |
 
 ## Запуск
 
 ```bash
-python3 scout.py --top 30                # только количественный скрининг, без Jev
-python3 scout.py --top 30 --age --ta      # + возраст монет + осцилляторы
-python3 scout.py --top 30 --news          # + классификация новостей через Jev (нужен ключ)
+python3 scout.py --top 30                          # только количественный скрининг, без Jev
+python3 scout.py --coins bitcoin,pepe,fartcoin      # свой список вместо топа по капе
+python3 scout.py --top 30 --age --ta                # + возраст монет + осцилляторы
+python3 scout.py --top 30 --fng                     # + Fear&Greed Index, DeFi TVL (фон рынка)
+python3 scout.py --top 30 --scalp                   # + сканер фандинга/1м-осцилляторов Bybit на тех же монетах
+python3 scout.py --top 30 --news                    # + классификация новостей через Jev (нужен ключ)
 
-python3 scalp.py --symbols BTCUSDT,ETHUSDT,SOLUSDT          # фандинг + минутные осцилляторы
+python3 scalp.py --symbols BTCUSDT,ETHUSDT,SOLUSDT          # фандинг + минутные осцилляторы, отдельно
 python3 scalp.py --symbols BTCUSDT --news                    # + вето Jev по новостям
 
 python3 scout.py --selftest && python3 scalp.py --selftest && python3 indicators.py
 ```
+
+Цветной вывод в терминале (зелёный/красный по знаку, жёлтый для тегов Jev)
+включается сам на настоящем терминале и выключается сам при выводе в файл —
+см. `colors.py`, без зависимости от `rich`/`colorama`.
 
 Ключ Jev — любой из трёх:
 
@@ -96,6 +104,8 @@ API Bybit (без ключа для рыночных данных):
 - [Bybit v5](https://bybit-exchange.github.io/docs/v5/intro) — фандинг, минутные свечи, без ключа для рыночных данных. Выбран вместо Binance, который отдал `451 Unavailable For Legal Reasons` с части нашей тестовой инфраструктуры (гео-блок биржи)
 - [Cointelegraph RSS](https://cointelegraph.com/rss) — источник новостей для разбора через Jev
 - [CoinMarketCap](https://coinmarketcap.com/api/) — опциональный запасной источник рыночных данных. `listings/latest` работает **без ключа** (проверено вживую), `quotes/latest` — нет (403 без ключа). См. `cmc.py`
+- [Alternative.me Fear & Greed Index](https://alternative.me/crypto/fear-and-greed-index/) — общее настроение рынка, флаг `--fng`, без ключа
+- [DeFiLlama](https://defillama.com/docs/api) — суммарный TVL DeFi по всем сетям, флаг `--fng`, без ключа
 
 ## Ограничения
 

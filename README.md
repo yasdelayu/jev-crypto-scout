@@ -37,20 +37,28 @@ retune them without a single new Jev call
 | `scout.py` | Top-N coins by market cap: momentum, ATH distance, vol/mcap, coin age, oscillators, Jev-classified news |
 | `scalp.py` | Short-horizon **signal scanner** (not an executor) — funding-rate extremity + 1-minute oscillators on Bybit, with Jev as a news-risk veto |
 | `indicators.py` | RSI / MACD histogram / Bollinger %B / Stochastic %K — pure Python, no TA-Lib |
+| `colors.py` | ANSI terminal colors, auto-off when not a TTY — no dependency |
 | `jev_client.py` | One client across three Jev providers (TypeSafe / Vercel AI Gateway / Cloudflare Workers AI) |
 
 ## Run it
 
 ```bash
-python3 scout.py --top 30                # quant screening only, no Jev
-python3 scout.py --top 30 --age --ta      # + coin age + oscillators
-python3 scout.py --top 30 --news          # + Jev news classification (needs a key)
+python3 scout.py --top 30                          # quant screening only, no Jev
+python3 scout.py --coins bitcoin,pepe,fartcoin      # your own watchlist instead of top-by-cap
+python3 scout.py --top 30 --age --ta                # + coin age + oscillators
+python3 scout.py --top 30 --fng                     # + Fear&Greed Index, DeFi TVL (market mood)
+python3 scout.py --top 30 --scalp                   # + Bybit funding/1m-oscillator scan, same coins
+python3 scout.py --top 30 --news                    # + Jev news classification (needs a key)
 
-python3 scalp.py --symbols BTCUSDT,ETHUSDT,SOLUSDT          # funding + 1m oscillators
+python3 scalp.py --symbols BTCUSDT,ETHUSDT,SOLUSDT          # funding + 1m oscillators, standalone
 python3 scalp.py --symbols BTCUSDT --news                    # + Jev news veto
 
 python3 scout.py --selftest && python3 scalp.py --selftest && python3 indicators.py
 ```
+
+Colored terminal output (green/red by sign, amber for Jev tags) turns on
+automatically on a real terminal and off automatically when piped to a
+file — see `colors.py`, no `rich`/`colorama` dependency.
 
 A Jev key, any of the three:
 
@@ -93,6 +101,8 @@ stops short of it.
 - [Bybit v5](https://bybit-exchange.github.io/docs/v5/intro) — funding rate, 1m klines, no key needed for market data. Chosen over Binance, which returned `451 Unavailable For Legal Reasons` from part of our test infrastructure (exchange geo-blocking)
 - [Cointelegraph RSS](https://cointelegraph.com/rss) — news source for the Jev classification step
 - [CoinMarketCap](https://coinmarketcap.com/api/) — optional alternate market-data source. `listings/latest` works **keyless** (live-verified), `quotes/latest` does not (403 without a key). See `cmc.py`
+- [Alternative.me Fear & Greed Index](https://alternative.me/crypto/fear-and-greed-index/) — overall market mood, `--fng`, no key
+- [DeFiLlama](https://defillama.com/docs/api) — total DeFi TVL across chains, `--fng`, no key
 
 ## Limitations
 

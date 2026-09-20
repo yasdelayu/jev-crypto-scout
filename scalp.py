@@ -22,6 +22,7 @@ if the real driver is a hack or a regulatory action technicals can't see.
 import argparse, json, statistics, sys, time, urllib.error, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
+import colors
 import indicators
 from jev_client import Jev, pick_provider
 from scout import fetch_news, match_news_to_coins, NEWS_QUESTIONS
@@ -124,23 +125,27 @@ def news_gate(jev, results, symbol_to_coin_name):
 
 
 def print_report(results):
-    print(f"\n{'symbol':<10}{'funding_z':>10}{'RSI(1m)':>9}{'Stoch':>7}{'candidate':>11}")
+    header = f"{'symbol':<10}{'funding_z':>10}{'RSI(1m)':>9}{'Stoch':>7}{'candidate':>11}"
+    print("\n" + colors.bold(f"⚡ {header}"))
     for r in results:
         if "error" in r:
-            print(f"{r['symbol']:<10} — {r['error']}")
+            print(f"{r['symbol']:<10} {colors.dim('— ' + r['error'])}")
             continue
         f, o = r["funding"], r["osc"]
-        tag = "YES" if r["candidate"] else ""
-        if r.get("news_veto"):
-            tag = "VETOED (news)"
-        print(f"{r['symbol']:<10}{f['z']:>10.2f}{(o['rsi'] or 0):>9.0f}{(o['stoch'] or 0):>7.0f}{tag:>11}")
+        tag = ""
+        if r["candidate"]:
+            tag = "VETOED (news)" if r.get("news_veto") else "YES"
+        tag_padded = f"{tag:>11}"
+        tag_colored = colors.red(tag_padded) if tag == "VETOED (news)" else (colors.amber(tag_padded) if tag == "YES" else tag_padded)
+        print(f"{r['symbol']:<10}{colors.signed(f['z'], 10, 2)}"
+              f"{(o['rsi'] or 0):>9.0f}{(o['stoch'] or 0):>7.0f}{tag_colored}")
         for reason in r.get("reasons", []):
-            print(f"    -> {reason}")
+            print(colors.dim(f"    -> {reason}"))
         if r.get("news_headline"):
-            print(f"    -> vetoed: {r['news_headline'][:70]}")
-    print("\nThis is a screening aid, not a signal to trade. It places no orders.")
-    print("For real execution discipline (trade-only keys, kill-switch, human approval),")
-    print("see the private architecture — this repo intentionally stops before that line.")
+            print(colors.red(f"    -> vetoed: {r['news_headline'][:70]}"))
+    print(colors.dim("\n⚠️  This is a screening aid, not a signal to trade. It places no orders."))
+    print(colors.dim("For real execution discipline (trade-only keys, kill-switch, human approval),"))
+    print(colors.dim("see the private architecture — this repo intentionally stops before that line."))
 
 
 def selftest():

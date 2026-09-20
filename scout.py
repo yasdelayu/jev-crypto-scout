@@ -3,6 +3,8 @@
 качественные суждения о новостях (тональность/катализатор/достоверность) через Jev.
 
     python3 scout.py --top 50                  # только количественный скрининг, без Jev
+    python3 scout.py --coins bitcoin,pepe,fartcoin  # свой список вместо топа по капе (id CoinGecko)
+    python3 scout.py --top 30 --scalp           # + сканер фандинга/1м-осцилляторов на Bybit
     python3 scout.py --top 50 --news            # + новости через Jev (нужен ключ)
     python3 scout.py --selftest                 # без сети
 
@@ -15,9 +17,12 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from jev_client import Jev, pick_provider
+import colors
 import indicators
 
 COINGECKO = "https://api.coingecko.com/api/v3"
+FNG_URL = "https://api.alternative.me/fng/?limit=1"          # без ключа
+DEFILLAMA_URL = "https://api.llama.fi/v2/chains"              # без ключа
 NEWS_FEEDS = ["https://cointelegraph.com/rss"]  # ponytail: один надёжный фид; больше — добавь в список
 
 NEWS_QUESTIONS = {
@@ -44,11 +49,30 @@ def get_json(url, timeout=20):
         return json.load(r)
 
 
-def fetch_markets(top_n):
-    """Топ N монет по капитализации с ценой, объёмом, ATH и % изменения — всё уже посчитано CoinGecko."""
-    url = (f"{COINGECKO}/coins/markets?vs_currency=usd&order=market_cap_desc"
-           f"&per_page={top_n}&page=1&price_change_percentage=24h,7d,30d&sparkline=false")
+def fetch_markets(top_n=None, ids=None):
+    """Топ N монет по капитализации — или свой список конкретных id (--coins),
+    когда топ по капе не нужен и хочется следить за своим набором. Тот же
+    эндпоинт, та же форма ответа — просто `ids=` вместо `order=`/`per_page=`."""
+    base = f"{COINGECKO}/coins/markets?vs_currency=usd&price_change_percentage=24h,7d,30d&sparkline=false"
+    url = f"{base}&ids={ids}" if ids else f"{base}&order=market_cap_desc&per_page={top_n}&page=1"
     return get_json(url)
+
+
+def fetch_market_context():
+    """Пара бесплатных индикаторов настроения рынка в целом — не для конкретной
+    монеты, для фона. Обе отдают без ключа, обе тесты живьём проходят."""
+    ctx = {}
+    try:
+        fng = get_json(FNG_URL, timeout=10)["data"][0]
+        ctx["fear_greed"] = {"value": int(fng["value"]), "label": fng["value_classification"]}
+    except Exception:
+        ctx["fear_greed"] = None
+    try:
+        chains = get_json(DEFILLAMA_URL, timeout=10)
+        ctx["defi_tvl_usd"] = sum(c.get("tvl") or 0 for c in chains)
+    except Exception:
+        ctx["defi_tvl_usd"] = None
+    return ctx
 
 
 def fetch_genesis_dates(coin_ids, workers=5):
@@ -208,34 +232,62 @@ def rank(coins, judged, osc_map=None):
     return sorted(scored, key=lambda x: (x["news_score"], x["momentum"]), reverse=True)
 
 
-def print_report(ranked, judged, age_map=None, show_osc=False):
+def print_report(ranked, judged, age_map=None, show_osc=False, context=None, scalp_results=None):
+    if context:
+        parts = []
+        fg = context.get("fear_greed")
+        if fg:
+            fg_color = colors.red if fg["value"] >= 55 else (colors.green if fg["value"] <= 45 else colors.dim)
+            parts.append("Fear&Greed " + fg_color(f"{fg['value']} {fg['label']}"))
+        tvl = context.get("defi_tvl_usd")
+        if tvl:
+            parts.append("DeFi TVL " + colors.dim(f"${tvl / 1e9:,.0f}B"))
+        if parts:
+            print(colors.dim("🌡️  фон рынка: ") + "  ·  ".join(parts))
+
     osc_cols = f"{'RSI':>6}{'MACD':>8}{'%B':>6}{'Stoch':>7}{'сигнал':>11}" if show_osc else ""
-    print(f"\n{'#':<3}{'монета':<8}{'капа':>16}{'24ч%':>8}{'7д%':>8}{'от ATH%':>10}"
-          f"{'vol/mcap':>10}{'возраст':>9}{'новости':>9}{osc_cols}")
+    header = f"{'#':<3}{'монета':<8}{'капа':>16}{'24ч%':>8}{'7д%':>8}{'от ATH%':>10}{'vol/mcap':>10}{'возраст':>9}{'новости':>9}{osc_cols}"
+    print("\n" + colors.bold(f"\U0001F4CA {header}"))
     for i, c in enumerate(ranked[:30], 1):
         age = age_map.get(c["id"]) if age_map else None
         age_s = f"{coin_age_years(age)}л" if age else "—"
-        line = (f"{i:<3}{c['symbol'].upper():<8}{c['market_cap']:>16,}"
-                f"{(c['pct_24h'] or 0):>8.1f}{(c['pct_7d'] or 0):>8.1f}"
+        line = (f"  {i:<3}{c['symbol'].upper():<8}{c['market_cap']:>16,}"
+                f"{colors.signed(c['pct_24h'], 8)}{colors.signed(c['pct_7d'], 8)}"
                 f"{(c['dist_from_ath_pct'] or 0):>10.1f}{(c['vol_to_mcap'] or 0):>10.3f}"
                 f"{age_s:>9}{c['news_score']:>9.1f}")
         if show_osc:
             o = c.get("osc")
             if o:
                 line += (f"{(o['rsi'] if o['rsi'] is not None else 0):>6.0f}"
-                         f"{(o['macd_hist'] if o['macd_hist'] is not None else 0):>8.2f}"
+                         f"{colors.signed(o['macd_hist'], 8, 2)}"
                          f"{(o['boll_b'] if o['boll_b'] is not None else 0):>6.2f}"
                          f"{(o['stoch'] if o['stoch'] is not None else 0):>7.0f}"
-                         f"{o['signal']:>11}")
+                         f"{colors.pill(o['signal'], 11)}")
             else:
                 line += f"{'—':>6}{'—':>8}{'—':>6}{'—':>7}{'':>11}"
         print(line)
+
+    if scalp_results:
+        print("\n" + colors.bold("⚡ scalp — фандинг + 1м-осцилляторы Bybit"))
+        print(f"  {'символ':<10}{'funding_z':>10}{'RSI(1м)':>9}{'Stoch':>7}{'кандидат':>11}")
+        for r in scalp_results:
+            if "error" in r:
+                print(f"  {r['symbol']:<10} {colors.dim('— ' + r['error'])}")
+                continue
+            f, o = r["funding"], r["osc"]
+            tag_padded = f"{'ДА' if r['candidate'] else 'нет':>11}"
+            tag = colors.red(tag_padded) if r["candidate"] else colors.dim(tag_padded)
+            print(f"  {r['symbol']:<10}{colors.signed(f['z'], 10, 2)}"
+                  f"{(o['rsi'] or 0):>9.0f}{(o['stoch'] or 0):>7.0f}{tag}")
+
     if judged:
-        print(f"\nНовости, разобранные Jev ({len(judged)}):")
+        print("\n" + colors.bold(f"🧠 новости, разобранные Jev ({len(judged)}):"))
         for j in sorted(judged, key=lambda x: -x["confirmed"])[:15]:
-            tag = f"[{j['sentiment']}/{j['catalyst']}/conf={j['confirmed']:.1f}]"
+            sent_color = colors.green if j["sentiment"] == "bullish" else (colors.red if j["sentiment"] == "bearish" else colors.dim)
+            tag = sent_color(f"[{j['sentiment']}/{j['catalyst']}/conf={j['confirmed']:.1f}]")
             print(f"  {','.join(j['coins']):<10} {tag:<45} {j['title'][:70]}")
-    print("\nЭто скрининг, не сигнал на сделку. Решение — за тобой.")
+
+    print(colors.dim("\n⚠️  Это скрининг, не сигнал на сделку. Решение — за тобой."))
 
 
 def selftest():
@@ -255,9 +307,12 @@ def selftest():
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--top", type=int, default=30, help="сколько монет по капитализации брать")
+    p.add_argument("--coins", help="свой список вместо топа: id CoinGecko через запятую, напр. bitcoin,pepe,fartcoin")
     p.add_argument("--news", action="store_true", help="разбирать новости через Jev (нужен ключ)")
     p.add_argument("--age", action="store_true", help="подтягивать возраст монет (доп. запросы к CoinGecko)")
-    p.add_argument("--ta", action="store_true", help="осцилляторы RSI/MACD/Bollinger/Stochastic по свечам Binance")
+    p.add_argument("--ta", action="store_true", help="осцилляторы RSI/MACD/Bollinger/Stochastic по свечам CoinGecko OHLC")
+    p.add_argument("--scalp", action="store_true", help="+ сканер фандинга/1м-осцилляторов Bybit на этих же монетах")
+    p.add_argument("--fng", action="store_true", help="+ Fear&Greed Index и суммарный DeFi TVL (фон рынка)")
     p.add_argument("--save", help="сохранить сырые данные в JSON")
     p.add_argument("--selftest", action="store_true")
     args = p.parse_args()
@@ -265,8 +320,14 @@ if __name__ == "__main__":
     if args.selftest:
         selftest(); sys.exit()
 
-    print(f"тяну топ-{args.top} монет с CoinGecko…")
-    coins = fetch_markets(args.top)
+    if args.coins:
+        print(f"тяну свой список монет: {args.coins}…")
+        coins = fetch_markets(ids=args.coins)
+    else:
+        print(f"тяну топ-{args.top} монет с CoinGecko…")
+        coins = fetch_markets(top_n=args.top)
+
+    context = fetch_market_context() if args.fng else None
 
     age_map = None
     if args.age:
@@ -279,6 +340,14 @@ if __name__ == "__main__":
         print(f"тяну свечи CoinGecko OHLC и считаю осцилляторы для {len(coins)} монет…")
         osc_map = fetch_oscillators(coins)
 
+    scalp_results = None
+    if args.scalp:
+        import scalp as scalp_mod  # ленивый импорт: --scalp не всегда нужен, лишняя зависимость от Bybit по умолчанию не тянется
+        symbols = [f"{c['symbol'].upper()}USDT" for c in coins if c["symbol"].lower() not in ("usdt", "usdc", "dai", "usds")]
+        print(f"⚡ сканирую фандинг+1м-осцилляторы на Bybit для {len(symbols)} монет…")
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            scalp_results = list(pool.map(scalp_mod.scan_symbol, symbols))
+
     judged = []
     if args.news:
         provider, key = pick_provider()
@@ -290,7 +359,7 @@ if __name__ == "__main__":
         judged = judge_news(jev, matched)
 
     ranked = rank(coins, judged, osc_map)
-    print_report(ranked, judged, age_map, show_osc=args.ta)
+    print_report(ranked, judged, age_map, show_osc=args.ta, context=context, scalp_results=scalp_results)
 
     if args.save:
         json.dump({"coins": ranked, "news": judged}, open(args.save, "w"), ensure_ascii=False, indent=1)
