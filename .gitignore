@@ -4,3 +4,4 @@ __pycache__/
 run_*.json
 .impeccable/
 history.db
+config.json

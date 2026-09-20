@@ -32,10 +32,14 @@ DEFILLAMA_URL = "https://api.llama.fi/v2/chains"              # без ключ�
 NEWS_FEEDS_BY_LANG = {
     "en": ["https://cointelegraph.com/rss",
            "https://www.coindesk.com/arc/outboundfeeds/rss/",
-           "https://decrypt.co/feed"],
+           "https://decrypt.co/feed",
+           "https://www.theblock.co/rss.xml",
+           "https://cryptobriefing.com/feed/",
+           "https://ambcrypto.com/feed/"],
     "ru": ["https://forklog.com/feed/",
            "https://beincrypto.ru/feed/",
-           "https://incrypted.com/feed/"],
+           "https://incrypted.com/feed/",
+           "https://coinspot.io/feed/"],
 }
 NEWS_FEEDS = NEWS_FEEDS_BY_LANG["en"]  # обратная совместимость для прямого импорта
 
@@ -211,7 +215,15 @@ def fetch_news(lang="en"):
             desc = re.sub("<[^>]+>", " ", item.findtext("description") or "")
             items.append({"title": title, "summary": " ".join(desc.split())[:400],
                           "link": item.findtext("link") or ""})
-    return items
+    # Дедуп по нормализованному заголовку — разные источники часто перепечатывают
+    # одну новость. Без этого Jev разбирал бы дубли, а дайджест их повторял.
+    seen, deduped = set(), []
+    for it in items:
+        key = re.sub(r"[^a-zа-я0-9]", "", it["title"].lower())[:80]
+        if key and key not in seen:
+            seen.add(key)
+            deduped.append(it)
+    return deduped
 
 
 def match_news_to_coins(news, coins):

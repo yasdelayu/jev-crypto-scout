@@ -1,20 +1,15 @@
 #!/usr/bin/env bash
-# Scheduled run wrapper, called by the systemd timer (or cron).
-# Loads secrets from /opt/jev-crypto-scout/.env, runs the full pipeline,
-# logs to history.db and sends a Telegram digest. Fails quietly to the
-# journal rather than spamming — a screening tool that errors shouldn't
-# wake anyone.
+# Scheduled run wrapper, called by the systemd timer.
+# Builds scout.py's flags from config.json (botconfig.py) — the SAME settings
+# the Telegram bot edits — so /top, /lang, /on, /off in chat also change what
+# the timer does. Then logs to history.db and sends the Telegram digest.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# .env holds TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, AI_GATEWAY_API_KEY —
-# never committed (see .gitignore), 600 perms, owned by the run user.
 if [ -f .env ]; then
   set -a; . ./.env; set +a
 fi
 
-# --top 100: screen the top 100 by market cap. --ta / --scalp are auto-limited
-# to the ~30 most-moving of those (rate limits), --fng: market mood.
-# --listings: Bybit new listings / delistings. --news --lang ru: Jev on
-# Russian-language crypto feeds. --log: accumulate history. --telegram: deliver.
-exec python3 scout.py --top 100 --ta --fng --scalp --listings --news --lang ru --log --telegram
+# botconfig.to_argv turns stored settings into CLI flags; add --log --telegram.
+ARGS=$(python3 -c "import botconfig; print(' '.join(botconfig.to_argv(botconfig.load())))")
+exec python3 scout.py $ARGS --log --telegram

@@ -1,0 +1,16 @@
+[Unit]
+Description=Jev Crypto Scout — interactive Telegram bot (long-polling)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/jev-crypto-scout
+# Load the same secrets the run wrapper uses, then run the long-polling bot.
+EnvironmentFile=/opt/jev-crypto-scout/.env
+ExecStart=/usr/bin/python3 /opt/jev-crypto-scout/bot.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

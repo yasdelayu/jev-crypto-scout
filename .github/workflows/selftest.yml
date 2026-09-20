@@ -20,3 +20,5 @@ jobs:
           python3 history.py
           python3 telegram_notify.py
           python3 listings.py
+          python3 botconfig.py
+          python3 bot.py --selftest
