@@ -173,11 +173,19 @@ def main():
                 msg = u.get("message") or u.get("edited_message") or {}
                 chat = str(msg.get("chat", {}).get("id", ""))
                 text = msg.get("text", "")
+                print(f"update from chat={chat} (owner={OWNER}) text={text!r}", file=sys.stderr, flush=True)
                 if chat != OWNER or not text:
                     continue  # только владелец
-                handle(text)
+                try:
+                    handle(text)
+                except Exception as e:
+                    print(f"handle error: {e!r}", file=sys.stderr, flush=True)
+                    try:
+                        send(f"⚠️ Ошибка: {e}")
+                    except Exception:
+                        pass
         except Exception as e:
-            print(f"poll error: {e}", file=sys.stderr)
+            print(f"poll error: {e!r}", file=sys.stderr, flush=True)
             time.sleep(5)
 
 
