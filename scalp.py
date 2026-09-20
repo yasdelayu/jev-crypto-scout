@@ -18,6 +18,13 @@ if the real driver is a hack or a regulatory action technicals can't see.
     python3 scalp.py --symbols BTCUSDT,ETHUSDT,SOLUSDT
     python3 scalp.py --symbols BTCUSDT --news              # + Jev news gate (needs a key)
     python3 scalp.py --selftest                             # no network
+
+Note on `HTTP Error 403: Forbidden`: that's Bybit's CloudFront/WAF layer
+temporarily blocking bursty traffic from one IP — not this script's fault,
+not a permanent geo-block (unlike Binance's real 451 elsewhere in this repo).
+It clears on its own after a short cooldown; re-running a minute later works.
+Firing this and scout.py's --scalp back-to-back many times in a short window
+is exactly what triggers it — space runs out if you're iterating fast.
 """
 import argparse, json, statistics, sys, time, urllib.error, urllib.request
 from concurrent.futures import ThreadPoolExecutor
