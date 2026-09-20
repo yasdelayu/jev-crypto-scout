@@ -46,20 +46,61 @@ def get_json(url, timeout=15):
     return d["result"]
 
 
-def funding_extremity(symbol, lookback=48):
-    """How many standard deviations the CURRENT funding rate sits from the
-    mean of its own last `lookback` periods (8h periods -> 48 = ~16 days).
-    A persistently high positive rate means longs are crowded and paying
-    shorts — classic mean-reversion setup, not a prediction, just a fact
-    about current positioning that code can measure exactly."""
+def fetch_instruments():
+    """One global call, not per symbol: which linear pairs actually exist on
+    Bybit, and each one's real settlement interval (`fundingInterval`, in
+    minutes — usually 480 = 8h, but the API exposes it per symbol instead of
+    a fixed global constant, so read it rather than hardcode 8h everywhere).
+    Fetched once per run and reused — this is what replaces catching a
+    'Symbol Invalid' error per coin with a clean skip before ever asking."""
+    rows = get_json(f"{BYBIT}/market/instruments-info?category=linear")["list"]
+    return {r["symbol"]: {"funding_interval_min": int(r["fundingInterval"])} for r in rows}
+
+
+def fetch_ticker(symbol):
+    """Live funding rate and the exact timestamp of the next settlement —
+    both on the tickers endpoint, no extra call needed for either."""
+    t = get_json(f"{BYBIT}/market/tickers?category=linear&symbol={symbol}")["list"][0]
+    return {"rate": float(t["fundingRate"]), "next_funding_ms": int(t["nextFundingTime"])}
+
+
+def funding_extremity(symbol, interval_min, lookback=48):
+    """Not just a z-score — the actual fact, in the terms a trader thinks in:
+    who is paying whom right now, how many settlements in a row it's held
+    that way, and how long until the next one resets the clock. The z-score
+    (how many standard deviations from its own recent mean) still drives the
+    candidate logic in scan_symbol(); everything else here is for a human
+    reading the line, which a bare number never explains on its own."""
     hist = get_json(f"{BYBIT}/market/funding/history?category=linear&symbol={symbol}&limit={lookback}")["list"]
     rates = [float(h["fundingRate"]) for h in hist]
     if len(rates) < 10:
         return None
-    current = rates[0]
+    ticker = fetch_ticker(symbol)
+    current = ticker["rate"]
     mean = statistics.mean(rates[1:])
     stdev = statistics.pstdev(rates[1:]) or 1e-9
-    return {"current": current, "mean": round(mean, 6), "z": round((current - mean) / stdev, 2)}
+
+    sign = (current > 0) - (current < 0)  # +1 / -1 / 0
+    streak = 0
+    for r in rates:
+        if ((r > 0) - (r < 0)) != sign:
+            break
+        streak += 1
+
+    next_reset_min = max(0, round((ticker["next_funding_ms"] - time.time() * 1000) / 60000))
+    direction = {1: "лонги платят шортам", -1: "шорты платят лонгам", 0: "нейтрально"}[sign]
+
+    return {"current": current, "mean": round(mean, 6), "z": round((current - mean) / stdev, 2),
+            "direction": direction, "streak_periods": streak,
+            "interval_hours": interval_min / 60, "next_reset_min": next_reset_min}
+
+
+def format_funding_note(f):
+    """One readable line: direction, how long it's held, when it resets —
+    the answer to 'фандинг минута — а кто кому платит, как давно, когда конец'."""
+    m = f["next_reset_min"]
+    reset = f"{m // 60}ч{m % 60:02d}м" if m >= 60 else f"{m}м"
+    return f"{f['direction']} · {f['streak_periods']}×{f['interval_hours']:.0f}ч подряд · сброс через {reset}"
 
 
 def short_horizon_oscillators(symbol, interval="1", limit=120):
@@ -79,9 +120,9 @@ def short_horizon_oscillators(symbol, interval="1", limit=120):
             "boll_b": indicators.bollinger_percent_b(closes), "signal": indicators.read_signal(rsi_v, stoch_v)}
 
 
-def scan_symbol(symbol):
+def scan_symbol(symbol, interval_min=480):
     try:
-        f = funding_extremity(symbol)
+        f = funding_extremity(symbol, interval_min)
         o = short_horizon_oscillators(symbol)
     except Exception as e:
         return {"symbol": symbol, "error": str(e)}
@@ -146,6 +187,7 @@ def print_report(results):
         tag_colored = colors.red(tag_padded) if tag == "VETOED (news)" else (colors.amber(tag_padded) if tag == "YES" else tag_padded)
         print(f"{r['symbol']:<10}{colors.signed(f['z'], 10, 2)}"
               f"{(o['rsi'] or 0):>9.0f}{(o['stoch'] or 0):>7.0f}{tag_colored}")
+        print(colors.dim(f"    {format_funding_note(f)}"))
         for reason in r.get("reasons", []):
             print(colors.dim(f"    -> {reason}"))
         if r.get("news_headline"):
@@ -162,6 +204,26 @@ def selftest():
     stdev = statistics.pstdev(rates[1:]) or 1e-9
     z = (rates[0] - mean) / stdev
     assert z > 5, z  # current is a huge outlier vs flat history
+
+    # streak counting: leading run of same-sign entries, offline
+    def streak_of(rates, sign):
+        n = 0
+        for r in rates:
+            if ((r > 0) - (r < 0)) != sign:
+                break
+            n += 1
+        return n
+    assert streak_of([0.1, 0.2, 0.3, -0.1], 1) == 3
+    assert streak_of([-0.1, -0.2, 0.3], -1) == 2
+    assert streak_of([0.0, 0.1], 0) == 1  # zero breaks a positive streak immediately
+
+    # human-readable note formats without crashing on edge values
+    note = format_funding_note({"direction": "лонги платят шортам", "streak_periods": 3,
+                                 "interval_hours": 8.0, "next_reset_min": 222})  # 222м = 3ч42м
+    assert "сброс через 3ч42м" in note, note
+    note0 = format_funding_note({"direction": "нейтрально", "streak_periods": 0,
+                                  "interval_hours": 8.0, "next_reset_min": 5})
+    assert "сброс через 5м" in note0, note0
 
     # candidate logic in isolation
     fake = [{"symbol": "XUSDT", "funding": {"z": 2.0}, "osc": {"signal": "overbought", "rsi": 78}}]
@@ -184,10 +246,17 @@ if __name__ == "__main__":
     if args.selftest:
         selftest(); sys.exit()
 
-    symbols = [s.strip().upper() for s in args.symbols.split(",")]
+    requested = [s.strip().upper() for s in args.symbols.split(",")]
+    instruments = fetch_instruments()
+    symbols = [s for s in requested if s in instruments]
+    skipped = [s for s in requested if s not in instruments]
+    if skipped:
+        print(colors.dim(f"пропускаю (не торгуется на Bybit как перпетуум): {', '.join(skipped)}"))
+
     print(f"scanning {len(symbols)} symbols on Bybit (funding + 1m oscillators)…")
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        results = list(pool.map(scan_symbol, symbols))
+        results = list(pool.map(
+            lambda s: scan_symbol(s, instruments[s]["funding_interval_min"]), symbols))
 
     if args.news:
         provider, key = pick_provider()

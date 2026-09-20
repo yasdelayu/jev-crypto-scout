@@ -268,6 +268,7 @@ def print_report(ranked, judged, age_map=None, show_osc=False, context=None, sca
         print(line)
 
     if scalp_results:
+        import scalp as scalp_mod  # тот же ленивый импорт, что и выше — печать не тянет Bybit-код, если --scalp не запрашивали
         print("\n" + colors.bold("⚡ scalp — фандинг + 1м-осцилляторы Bybit"))
         print(f"  {'символ':<10}{'funding_z':>10}{'RSI(1м)':>9}{'Stoch':>7}{'кандидат':>11}")
         for r in scalp_results:
@@ -279,6 +280,7 @@ def print_report(ranked, judged, age_map=None, show_osc=False, context=None, sca
             tag = colors.red(tag_padded) if r["candidate"] else colors.dim(tag_padded)
             print(f"  {r['symbol']:<10}{colors.signed(f['z'], 10, 2)}"
                   f"{(o['rsi'] or 0):>9.0f}{(o['stoch'] or 0):>7.0f}{tag}")
+            print(colors.dim(f"      {scalp_mod.format_funding_note(f)}"))
 
     if judged:
         print("\n" + colors.bold(f"🧠 новости, разобранные Jev ({len(judged)}):"))
@@ -346,10 +348,16 @@ if __name__ == "__main__":
     scalp_results = None
     if args.scalp:
         import scalp as scalp_mod  # ленивый импорт: --scalp не всегда нужен, лишняя зависимость от Bybit по умолчанию не тянется
-        symbols = [f"{c['symbol'].upper()}USDT" for c in coins if c["symbol"].lower() not in ("usdt", "usdc", "dai", "usds")]
+        candidates = [f"{c['symbol'].upper()}USDT" for c in coins if c["symbol"].lower() not in ("usdt", "usdc", "dai", "usds")]
+        instruments = scalp_mod.fetch_instruments()  # один запрос: какие пары реально есть на Bybit + их интервал фандинга
+        symbols = [s for s in candidates if s in instruments]
+        skipped = [s for s in candidates if s not in instruments]
+        if skipped:
+            print(colors.dim(f"⚡ пропускаю (не торгуется на Bybit как перпетуум): {', '.join(skipped)}"))
         print(f"⚡ сканирую фандинг+1м-осцилляторы на Bybit для {len(symbols)} монет…")
         with ThreadPoolExecutor(max_workers=4) as pool:
-            scalp_results = list(pool.map(scalp_mod.scan_symbol, symbols))
+            scalp_results = list(pool.map(
+                lambda s: scalp_mod.scan_symbol(s, instruments[s]["funding_interval_min"]), symbols))
 
     judged = []
     if args.news:
