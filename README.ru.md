@@ -46,6 +46,8 @@ Jev используется только там, где нужна именно
 | `indicators.py` | RSI / MACD-гистограмма / %B Боллинджера / Stochastic %K — чистый Python, без TA-Lib |
 | `colors.py` | ANSI-цвета терминала, сами выключаются вне TTY — без зависимостей |
 | `http_client.py` | Общий HTTP GET с ретраями, используют и scout.py, и scalp.py |
+| `listings.py` | Трекер листингов/делистингов Bybit (`--listings`), без ключа |
+| `telegram_notify.py` | Доставка дайджеста в Telegram (`--telegram`) для регулярных прогонов, без зависимостей |
 | `history.py` / `validate.py` | Опциональный лог прогонов в SQLite (`--log`) и честная проверка сигнала по нему — не готовый бэктест, см. докстринг файла |
 | `jev_client.py` | Один клиент на три провайдера Jev (нативный TypeSafe / Vercel AI Gateway / Cloudflare Workers AI) |
 
@@ -58,7 +60,8 @@ python3 scout.py --top 30 --age --ta                # + возраст моне�
 python3 scout.py --top 30 --fng                     # + Fear&Greed Index, DeFi TVL (фон рынка)
 python3 scout.py --top 30 --scalp                   # + сканер фандинга/1м-осцилляторов Bybit на тех же монетах
 python3 scout.py --top 30 --news                    # + классификация новостей через Jev (нужен ключ), вопросы на английском (дефолт)
-python3 scout.py --top 30 --news --lang ru           # то же самое, но вопросы Jev — на русском
+python3 scout.py --top 30 --listings                 # + листинги/делистинги с Bybit
+python3 scout.py --top 30 --news --lang ru           # русскоязычные фиды (ForkLog/BeInCrypto/Incrypted) + вопросы Jev на русском
 
 python3 scalp.py --symbols BTCUSDT,ETHUSDT,SOLUSDT          # фандинг + минутные осцилляторы, отдельно
 python3 scalp.py --symbols BTCUSDT --news                    # + вето Jev по новостям

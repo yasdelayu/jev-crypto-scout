@@ -45,6 +45,8 @@ retune them without a single new Jev call
 | `indicators.py` | RSI / MACD histogram / Bollinger %B / Stochastic %K — pure Python, no TA-Lib |
 | `colors.py` | ANSI terminal colors, auto-off when not a TTY — no dependency |
 | `http_client.py` | One shared HTTP GET with retry/backoff, used by scout.py and scalp.py |
+| `listings.py` | Bybit listing/delisting tracker (`--listings`), no key |
+| `telegram_notify.py` | Telegram digest delivery (`--telegram`) for scheduled runs, no dependency |
 | `history.py` / `validate.py` | Opt-in SQLite run log (`--log`) and an honest forward-return check against it — not a finished backtest, see the file's own docstring |
 | `jev_client.py` | One client across three Jev providers (TypeSafe / Vercel AI Gateway / Cloudflare Workers AI) |
 
@@ -57,7 +59,8 @@ python3 scout.py --top 30 --age --ta                # + coin age + oscillators
 python3 scout.py --top 30 --fng                     # + Fear&Greed Index, DeFi TVL (market mood)
 python3 scout.py --top 30 --scalp                   # + Bybit funding/1m-oscillator scan, same coins
 python3 scout.py --top 30 --news                    # + Jev news classification (needs a key)
-python3 scout.py --top 30 --news --lang ru           # same, but questions asked in Russian
+python3 scout.py --top 30 --listings                 # + Bybit listings / delistings
+python3 scout.py --top 30 --news --lang ru           # Russian-language feeds + questions to Jev in Russian
 
 python3 scalp.py --symbols BTCUSDT,ETHUSDT,SOLUSDT          # funding + 1m oscillators, standalone
 python3 scalp.py --symbols BTCUSDT --news                    # + Jev news veto
