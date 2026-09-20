@@ -31,7 +31,7 @@ def _arrow(v):
     return f"🟢+{v:.1f}%" if v >= 0 else f"🔴{v:.1f}%"
 
 
-def format_digest(ranked, judged=None, scalp_results=None, context=None, top_n=8):
+def format_digest(ranked, judged=None, scalp_results=None, context=None, listings_data=None, top_n=8):
     """Short HTML digest for a phone screen — not the full terminal table.
     Leads with market mood, then the top movers, then any oscillator signals,
     then Jev's bearish/bullish news flags. Deliberately compact."""
@@ -74,12 +74,18 @@ def format_digest(ranked, judged=None, scalp_results=None, context=None, top_n=8
                 title = html.escape(j["title"][:60])
                 lines.append(f"{emoji} <code>{coins}</code> {html.escape(j['catalyst'])}: {title}")
 
+    if listings_data:
+        lines.append("\n<b>📋 листинги/делистинги (Bybit):</b>")
+        for l in listings_data[:6]:
+            mark = "📈" if l["kind"] == "listing" else "📉"
+            lines.append(f"{mark} {html.escape(l['title'][:60])}")
+
     lines.append("\n<i>Скрининг, не сигнал на сделку.</i>")
     return "\n".join(lines)
 
 
-def notify(ranked, judged=None, scalp_results=None, context=None):
-    return _send(format_digest(ranked, judged, scalp_results, context))
+def notify(ranked, judged=None, scalp_results=None, context=None, listings_data=None):
+    return _send(format_digest(ranked, judged, scalp_results, context, listings_data))
 
 
 def selftest():

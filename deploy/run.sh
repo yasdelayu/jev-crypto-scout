@@ -13,8 +13,8 @@ if [ -f .env ]; then
   set -a; . ./.env; set +a
 fi
 
-# --top 20: the screen. --ta: oscillators. --fng: market mood.
-# --scalp: Bybit funding (works from this server's region, unlike some).
-# --news: real Jev classification if the key is present.
-# --log: accumulate history for validate.py. --telegram: deliver.
-exec python3 scout.py --top 20 --ta --fng --scalp --news --log --telegram
+# --top 100: screen the top 100 by market cap. --ta / --scalp are auto-limited
+# to the ~30 most-moving of those (rate limits), --fng: market mood.
+# --listings: Bybit new listings / delistings. --news --lang ru: Jev on
+# Russian-language crypto feeds. --log: accumulate history. --telegram: deliver.
+exec python3 scout.py --top 100 --ta --fng --scalp --listings --news --lang ru --log --telegram

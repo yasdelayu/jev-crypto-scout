@@ -24,7 +24,20 @@ import indicators
 COINGECKO = "https://api.coingecko.com/api/v3"
 FNG_URL = "https://api.alternative.me/fng/?limit=1"          # без ключа
 DEFILLAMA_URL = "https://api.llama.fi/v2/chains"              # без ключа
-NEWS_FEEDS = ["https://cointelegraph.com/rss"]  # ponytail: один надёжный фид; больше — добавь в список
+
+# Фиды по языку — все проверены живьём 21.09.2026. Русский режим (--lang ru)
+# берёт русскоязычные источники, чтобы и текст новости, и вопрос к Jev были
+# на одном языке. Матчинг новость↔монета работает в обоих: имена/тикеры монет
+# (BTC, Bitcoin) в русских новостях почти всегда латиницей.
+NEWS_FEEDS_BY_LANG = {
+    "en": ["https://cointelegraph.com/rss",
+           "https://www.coindesk.com/arc/outboundfeeds/rss/",
+           "https://decrypt.co/feed"],
+    "ru": ["https://forklog.com/feed/",
+           "https://beincrypto.ru/feed/",
+           "https://incrypted.com/feed/"],
+}
+NEWS_FEEDS = NEWS_FEEDS_BY_LANG["en"]  # обратная совместимость для прямого импорта
 
 # Две версии одних и тех же трёх вопросов, не одна — язык вопроса влияет на
 # калибровку Jev (доки TypeSafe прямо говорят: английский основной, остальные
@@ -183,9 +196,9 @@ def quant_signals(coin):
     }
 
 
-def fetch_news():
+def fetch_news(lang="en"):
     items = []
-    for feed_url in NEWS_FEEDS:
+    for feed_url in NEWS_FEEDS_BY_LANG.get(lang, NEWS_FEEDS_BY_LANG["en"]):
         try:
             req = urllib.request.Request(feed_url, headers={"User-Agent": "jev-crypto-scout/1"})
             with urllib.request.urlopen(req, timeout=20) as r:
@@ -261,7 +274,7 @@ def rank(coins, judged, osc_map=None):
     return sorted(scored, key=lambda x: (x["news_score"], x["momentum"]), reverse=True)
 
 
-def print_report(ranked, judged, age_map=None, show_osc=False, context=None, scalp_results=None):
+def print_report(ranked, judged, age_map=None, show_osc=False, context=None, scalp_results=None, listings_data=None):
     if context:
         parts = []
         fg = context.get("fear_greed")
@@ -321,6 +334,13 @@ def print_report(ranked, judged, age_map=None, show_osc=False, context=None, sca
             tag = sent_color(f"[{j['sentiment']}({j['sent_conf']:.2f})/{j['catalyst']}/подтв={j['confirmed']:.1f}]")
             print(f"  {','.join(j['coins']):<10} {tag:<45} {j['title'][:70]}")
 
+    if listings_data:
+        import listings as listings_mod
+        print("\n" + colors.bold("📋 листинги/делистинги (Bybit):"))
+        for line in listings_mod.format_listings(listings_data, 10):
+            colored = colors.green(line) if line.startswith("📈") else colors.red(line)
+            print("  " + colored)
+
     print(colors.dim("\n⚠️  Это скрининг, не сигнал на сделку. Решение — за тобой."))
 
 
@@ -347,8 +367,12 @@ if __name__ == "__main__":
                     help="язык вопросов к Jev про новости: en (по умолчанию, под англоязычный Cointelegraph) или ru")
     p.add_argument("--age", action="store_true", help="подтягивать возраст монет (доп. запросы к CoinGecko)")
     p.add_argument("--ta", action="store_true", help="осцилляторы RSI/MACD/Bollinger/Stochastic по свечам CoinGecko OHLC")
+    p.add_argument("--ta-limit", type=int, default=30,
+                    help="на списках длиннее этого осцилляторы считаются только для самых подвижных монет (rate-limit CoinGecko)")
     p.add_argument("--scalp", action="store_true", help="+ сканер фандинга/1м-осцилляторов Bybit на этих же монетах")
     p.add_argument("--fng", action="store_true", help="+ Fear&Greed Index и суммарный DeFi TVL (фон рынка)")
+    p.add_argument("--listings", action="store_true",
+                    help="+ свежие листинги/делистинги с Bybit (без ключа) — крепкий сигнал катализатора")
     p.add_argument("--save", help="сохранить сырые данные в JSON")
     p.add_argument("--log", action="store_true",
                     help="дописать этот прогон в history.db (SQLite) — фундамент для validate.py")
@@ -369,6 +393,12 @@ if __name__ == "__main__":
 
     context = fetch_market_context() if args.fng else None
 
+    listings_data = None
+    if args.listings:
+        import listings as listings_mod
+        print("📋 тяну листинги/делистинги с Bybit…")
+        listings_data = listings_mod.fetch_listings()
+
     age_map = None
     if args.age:
         shortlist = [c["id"] for c in sorted(coins, key=lambda c: abs(c.get("price_change_percentage_24h_in_currency") or 0), reverse=True)[:10]]
@@ -377,13 +407,30 @@ if __name__ == "__main__":
 
     osc_map = None
     if args.ta:
-        print(f"тяну свечи CoinGecko OHLC и считаю осцилляторы для {len(coins)} монет…")
-        osc_map = fetch_oscillators(coins)
+        # Осцилляторы — 1 запрос CoinGecko OHLC на монету, последовательно. На
+        # большом --top (100) это упрётся в rate-limit free-тира и займёт минуты.
+        # Поэтому для длинных списков считаем только по самым подвижным монетам
+        # (топ-30 по |7д%|) — именно там осцилляторы что-то значат, у стоящей на
+        # месте монеты RSI неинтересен. Порог берём от args.ta_limit.
+        ta_coins = coins
+        if len(coins) > args.ta_limit:
+            ta_coins = sorted(coins, key=lambda c: abs(c.get("price_change_percentage_7d_in_currency") or 0),
+                              reverse=True)[:args.ta_limit]
+            print(f"тяну свечи CoinGecko OHLC для топ-{args.ta_limit} самых подвижных из {len(coins)} монет…")
+        else:
+            print(f"тяну свечи CoinGecko OHLC и считаю осцилляторы для {len(ta_coins)} монет…")
+        osc_map = fetch_oscillators(ta_coins)
 
     scalp_results = None
     if args.scalp:
         import scalp as scalp_mod  # ленивый импорт: --scalp не всегда нужен, лишняя зависимость от Bybit по умолчанию не тянется
-        candidates = [f"{c['symbol'].upper()}USDT" for c in coins if c["symbol"].lower() not in ("usdt", "usdc", "dai", "usds")]
+        # тот же приём, что и для --ta: на большом списке скальпим только самые
+        # подвижные монеты — 3 запроса Bybit на монету, 100 монет это перебор
+        scalp_coins = coins
+        if len(coins) > args.ta_limit:
+            scalp_coins = sorted(coins, key=lambda c: abs(c.get("price_change_percentage_7d_in_currency") or 0),
+                                 reverse=True)[:args.ta_limit]
+        candidates = [f"{c['symbol'].upper()}USDT" for c in scalp_coins if c["symbol"].lower() not in ("usdt", "usdc", "dai", "usds")]
         instruments = scalp_mod.fetch_instruments()  # один запрос: какие пары реально есть на Bybit + их интервал фандинга
         if instruments is None:
             print(colors.dim("⚡ не удалось получить список инструментов Bybit (сеть/блок) — "
@@ -404,13 +451,14 @@ if __name__ == "__main__":
         provider, key = pick_provider()
         jev = Jev(provider, key)
         print(f"тяну новости, провайдер Jev: {provider}…")
-        news = fetch_news()
+        news = fetch_news(lang=args.lang)
         matched = match_news_to_coins(news, coins)
         print(f"{len(news)} новостей, {len(matched)} касаются отслеживаемых монет — прогоняю через Jev…")
         judged = judge_news(jev, matched, lang=args.lang)
 
     ranked = rank(coins, judged, osc_map)
-    print_report(ranked, judged, age_map, show_osc=args.ta, context=context, scalp_results=scalp_results)
+    print_report(ranked, judged, age_map, show_osc=args.ta, context=context,
+                 scalp_results=scalp_results, listings_data=listings_data)
 
     if args.save:
         json.dump({"coins": ranked, "news": judged}, open(args.save, "w"), ensure_ascii=False, indent=1)
@@ -424,7 +472,8 @@ if __name__ == "__main__":
     if args.telegram:
         import telegram_notify
         try:
-            telegram_notify.notify(ranked, judged=judged, scalp_results=scalp_results, context=context)
+            telegram_notify.notify(ranked, judged=judged, scalp_results=scalp_results,
+                                   context=context, listings_data=listings_data)
             print("дайджест отправлен в Telegram")
         except Exception as e:
             print(f"не удалось отправить в Telegram: {e}", file=sys.stderr)

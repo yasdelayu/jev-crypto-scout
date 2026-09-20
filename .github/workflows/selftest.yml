@@ -18,3 +18,5 @@ jobs:
           python3 scalp.py --selftest
           python3 indicators.py
           python3 history.py
+          python3 telegram_notify.py
+          python3 listings.py
