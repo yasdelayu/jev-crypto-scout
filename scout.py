@@ -25,7 +25,30 @@ FNG_URL = "https://api.alternative.me/fng/?limit=1"          # без ключа
 DEFILLAMA_URL = "https://api.llama.fi/v2/chains"              # без ключа
 NEWS_FEEDS = ["https://cointelegraph.com/rss"]  # ponytail: один надёжный фид; больше — добавь в список
 
-NEWS_QUESTIONS = {
+# Две версии одних и тех же трёх вопросов, не одна — язык вопроса влияет на
+# калибровку Jev (доки TypeSafe прямо говорят: английский основной, остальные
+# языки "не одинаково хорошо"). NEWS_FEEDS сейчас англоязычный (Cointelegraph),
+# поэтому "en" — дефолт: вопрос на том же языке, что и сама новость, и на языке,
+# где Jev откалиброван лучше всего. "ru" держим для будущих русскоязычных
+# источников (--lang ru), а не потому что английский обязателен.
+NEWS_QUESTIONS_EN = {
+    "sentiment": {"type": "choice", "instructions": "The news item's tone toward the mentioned coin",
+                  "criteria": {"bullish": "positive for price: growth, adoption, listing, partnership",
+                               "bearish": "negative: hack, regulatory ban, lawsuit, sell-off",
+                               "neutral": "neutral or purely informational, no clear price impact"}},
+    "catalyst": {"type": "choice", "instructions": "What kind of event this news item is about",
+                 "criteria": {"listing": "exchange listing or delisting",
+                              "hack_exploit": "hack, exploit, theft of funds",
+                              "regulation": "regulatory decision, lawsuit, law",
+                              "partnership": "partnership, integration, institutional adoption",
+                              "hype_speculation": "speculation, opinion, forecast with no confirmed facts",
+                              "other": "doesn't fit any category above"}},
+    "confirmed": {"type": "score", "instructions": "How confirmed by facts the news item is, versus rumor",
+                  "criteria": ["rumor or anonymous source", "partially confirmed by one party",
+                               "confirmed by an official source or document"]},
+}
+
+NEWS_QUESTIONS_RU = {
     "sentiment": {"type": "choice", "instructions": "Тональность новости по отношению к упомянутой монете",
                   "criteria": {"bullish": "позитивная для цены: рост, принятие, листинг, партнёрство",
                                "bearish": "негативная: взлом, регуляторный запрет, иск, распродажа",
@@ -41,6 +64,9 @@ NEWS_QUESTIONS = {
                   "criteria": ["слух или анонимный источник", "частично подтверждено одной стороной",
                                "подтверждено официальным источником или документом"]},
 }
+
+NEWS_QUESTIONS_BY_LANG = {"en": NEWS_QUESTIONS_EN, "ru": NEWS_QUESTIONS_RU}
+NEWS_QUESTIONS = NEWS_QUESTIONS_EN  # обратная совместимость для прямого импорта
 
 
 def get_json(url, timeout=20):
@@ -193,12 +219,14 @@ def match_news_to_coins(news, coins):
     return out
 
 
-def judge_news(jev, matched, workers=4):
+def judge_news(jev, matched, lang="en", workers=4):
     """Один запрос Jev на новость: тональность + тип катализатора + подтверждённость.
     Три вопроса за один round trip (speculative fan-out) вместо трёх отдельных запросов."""
+    questions = NEWS_QUESTIONS_BY_LANG[lang]
+
     def one(pair):
         news, coins = pair
-        r = jev.ask(f"{news['title']}. {news['summary']}", NEWS_QUESTIONS)
+        r = jev.ask(f"{news['title']}. {news['summary']}", questions)
         a = r["answers"]
         return {"title": news["title"], "link": news["link"],
                 "coins": [c["symbol"].upper() for c in coins],
@@ -314,6 +342,8 @@ if __name__ == "__main__":
     p.add_argument("--top", type=int, default=30, help="сколько монет по капитализации брать")
     p.add_argument("--coins", help="свой список вместо топа: id CoinGecko через запятую, напр. bitcoin,pepe,fartcoin")
     p.add_argument("--news", action="store_true", help="разбирать новости через Jev (нужен ключ)")
+    p.add_argument("--lang", choices=["en", "ru"], default="en",
+                    help="язык вопросов к Jev про новости: en (по умолчанию, под англоязычный Cointelegraph) или ru")
     p.add_argument("--age", action="store_true", help="подтягивать возраст монет (доп. запросы к CoinGecko)")
     p.add_argument("--ta", action="store_true", help="осцилляторы RSI/MACD/Bollinger/Stochastic по свечам CoinGecko OHLC")
     p.add_argument("--scalp", action="store_true", help="+ сканер фандинга/1м-осцилляторов Bybit на этих же монетах")
@@ -367,7 +397,7 @@ if __name__ == "__main__":
         news = fetch_news()
         matched = match_news_to_coins(news, coins)
         print(f"{len(news)} новостей, {len(matched)} касаются отслеживаемых монет — прогоняю через Jev…")
-        judged = judge_news(jev, matched)
+        judged = judge_news(jev, matched, lang=args.lang)
 
     ranked = rank(coins, judged, osc_map)
     print_report(ranked, judged, age_map, show_osc=args.ta, context=context, scalp_results=scalp_results)

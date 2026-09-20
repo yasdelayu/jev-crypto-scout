@@ -32,7 +32,7 @@ from concurrent.futures import ThreadPoolExecutor
 import colors
 import indicators
 from jev_client import Jev, pick_provider
-from scout import fetch_news, match_news_to_coins, NEWS_QUESTIONS
+from scout import fetch_news, match_news_to_coins, NEWS_QUESTIONS_BY_LANG
 
 BYBIT = "https://api.bybit.com/v5"
 
@@ -142,11 +142,12 @@ def scan_symbol(symbol, interval_min=480):
     return {"symbol": symbol, "funding": f, "osc": o, "candidate": bool(reasons), "reasons": reasons}
 
 
-def news_gate(jev, results, symbol_to_coin_name):
+def news_gate(jev, results, symbol_to_coin_name, lang="en"):
     """One Jev call per still-live candidate: is there a very recent,
     confident, bearish/regulatory item about this symbol? If yes, veto it —
     technical setups say nothing about news-driven risk, and that is exactly
     the kind of natural-language judgment Jev is for (not the scoring above)."""
+    questions = NEWS_QUESTIONS_BY_LANG[lang]
     news = fetch_news()
     coins = [{"name": name, "symbol": sym.replace("USDT", "").lower()}
              for sym, name in symbol_to_coin_name.items()]
@@ -165,7 +166,7 @@ def news_gate(jev, results, symbol_to_coin_name):
             r["news_veto"] = False
             continue
         # only need the single most recent matched item — that's what the gate is for
-        a = jev.ask(f"{items[0]['title']}. {items[0]['summary']}", NEWS_QUESTIONS)["answers"]
+        a = jev.ask(f"{items[0]['title']}. {items[0]['summary']}", questions)["answers"]
         bearish = a["sentiment"]["choice"] == "bearish" and a["sentiment"]["confidence"] > 0.7
         r["news_veto"] = bearish
         r["news_headline"] = items[0]["title"] if bearish else None
@@ -239,6 +240,7 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--symbols", default="BTCUSDT,ETHUSDT,SOLUSDT", help="comma-separated Bybit linear symbols")
     p.add_argument("--news", action="store_true", help="apply the Jev news veto (needs a key)")
+    p.add_argument("--lang", choices=["en", "ru"], default="en", help="language of the news questions sent to Jev")
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--selftest", action="store_true")
     args = p.parse_args()
@@ -263,6 +265,6 @@ if __name__ == "__main__":
         jev = Jev(provider, key)
         name_map = {s: s.replace("USDT", "") for s in symbols}  # crude but matches match_news_to_coins by symbol
         print("applying Jev news gate to live candidates…")
-        results = news_gate(jev, results, name_map)
+        results = news_gate(jev, results, name_map, lang=args.lang)
 
     print_report(results)
