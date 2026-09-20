@@ -284,7 +284,10 @@ def print_report(ranked, judged, age_map=None, show_osc=False, context=None, sca
         print("\n" + colors.bold(f"🧠 новости, разобранные Jev ({len(judged)}):"))
         for j in sorted(judged, key=lambda x: -x["confirmed"])[:15]:
             sent_color = colors.green if j["sentiment"] == "bullish" else (colors.red if j["sentiment"] == "bearish" else colors.dim)
-            tag = sent_color(f"[{j['sentiment']}/{j['catalyst']}/conf={j['confirmed']:.1f}]")
+            # confirmed — score 0..2 (слух/частично/официально), НЕ путать с sent_conf —
+            # настоящей 0..1 уверенностью Choice-вопроса про тональность. Раньше оба
+            # печатались под одной подписью "conf=" — легко спутать с калибровкой Jev.
+            tag = sent_color(f"[{j['sentiment']}({j['sent_conf']:.2f})/{j['catalyst']}/подтв={j['confirmed']:.1f}]")
             print(f"  {','.join(j['coins']):<10} {tag:<45} {j['title'][:70]}")
 
     print(colors.dim("\n⚠️  Это скрининг, не сигнал на сделку. Решение — за тобой."))
