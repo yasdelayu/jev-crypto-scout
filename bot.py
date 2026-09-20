@@ -25,7 +25,8 @@ HELP = """<b>🤖 Jev Crypto Scout — бот</b>
 Это скринер крипты: считает индикаторы в коде, а новости разбирает ИИ-модель Jev. Ничего не покупает и не продаёт — присылает сводку, решаешь ты.
 
 <b>Команды:</b>
-/run — прогнать сейчас и прислать сводку
+/quick — быстрая сводка (топ-20, ~1–2 мин)
+/run — полный прогон (по настройкам, ~3–5 мин)
 /settings — текущие настройки
 /top 50 — сколько монет отслеживать (по капитализации)
 /lang ru — язык новостей (ru или en)
@@ -101,18 +102,27 @@ def send(text):
 _run_lock = threading.Lock()
 
 
-def run_scout():
-    """Trigger a full run with the current config; scout.py sends the digest
-    itself via --telegram. Runs in a thread so polling keeps responding.
-    Reports failure to the user instead of dying silently (the /run bug:
-    scout hit CoinGecko 429 and check=False swallowed it)."""
+def run_scout(quick=False):
+    """Trigger a run; scout.py sends the digest itself via --telegram. Runs in
+    a thread so polling keeps responding, reports failure instead of dying
+    silently. quick=True: a fast profile (top-20, no slow daily oscillators)
+    for 'just show me now' — the full config run takes several minutes."""
     if not _run_lock.acquire(blocking=False):
         send("⏳ Прогон уже идёт, подожди его окончания.")
         return
     try:
-        cfg = botconfig.load()
-        argv = [sys.executable, os.path.join(HERE, "scout.py")] + botconfig.to_argv(cfg) + ["--log", "--telegram"]
-        send("⏳ Запускаю прогон, это займёт пару минут…")
+        if quick:
+            # fast: skip --ta (sequential CoinGecko OHLC is the slow part),
+            # keep the high-value bits — funding, news, listings, attention.
+            argv = [sys.executable, os.path.join(HERE, "scout.py"),
+                    "--top", "20", "--fng", "--scalp", "--listings",
+                    "--news", "--attention", "--lang", botconfig.load().get("lang", "ru"),
+                    "--telegram"]
+            send("⏳ Быстрый прогон (топ-20, ~1–2 мин)…")
+        else:
+            cfg = botconfig.load()
+            argv = [sys.executable, os.path.join(HERE, "scout.py")] + botconfig.to_argv(cfg) + ["--log", "--telegram"]
+            send(f"⏳ Полный прогон (топ-{cfg.get('top', 100)}, ~3–5 мин). Для быстрого — /quick")
         r = subprocess.run(argv, cwd=HERE, timeout=900, capture_output=True, text=True)
         if r.returncode != 0:
             tail = (r.stderr or r.stdout or "").strip().splitlines()[-1:] or ["неизвестная ошибка"]
@@ -156,6 +166,8 @@ def handle(text):
         send(settings_text(cfg))
     elif cmd == "run":
         threading.Thread(target=run_scout, daemon=True).start()
+    elif cmd == "quick":
+        threading.Thread(target=lambda: run_scout(quick=True), daemon=True).start()
     elif cmd == "top":
         if arg.isdigit() and 1 <= int(arg) <= 250:
             cfg["top"] = int(arg); botconfig.save(cfg)
