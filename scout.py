@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from jev_client import Jev, pick_provider
+from http_client import get_json
 import colors
 import indicators
 
@@ -67,12 +68,6 @@ NEWS_QUESTIONS_RU = {
 
 NEWS_QUESTIONS_BY_LANG = {"en": NEWS_QUESTIONS_EN, "ru": NEWS_QUESTIONS_RU}
 NEWS_QUESTIONS = NEWS_QUESTIONS_EN  # обратная совместимость для прямого импорта
-
-
-def get_json(url, timeout=20):
-    req = urllib.request.Request(url, headers={"User-Agent": "jev-crypto-scout/1"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.load(r)
 
 
 def fetch_markets(top_n=None, ids=None):
@@ -208,12 +203,18 @@ def fetch_news():
 
 def match_news_to_coins(news, coins):
     """Дешёвый коарс-фильтр в коде: по названию/тикеру, до того как тратить запросы к Jev.
-    Тот самый паттерн relevance-coarse-filter из экосистемы Jev — но без ИИ, просто подстрока."""
+    Тот самый паттерн relevance-coarse-filter из экосистемы Jev — но без ИИ, просто подстрока.
+
+    Граница слова обязательна на ОБОИХ полях, не только на symbol: монета с
+    именем из обычного английского слова (Sun, Flow, Beam, Core...) иначе
+    ложно матчится на "sunday", "cashflow", "core inflation" и т.д. — то есть
+    попадает под разбор Jev с чужой новостью и теряет реально релевантную."""
     out = []
     for n in news:
         text = f"{n['title']} {n['summary']}".lower()
-        hits = [c for c in coins if c["name"].lower() in text
-                or re.search(rf"\b{re.escape(c['symbol'])}\b", text)]
+        hits = [c for c in coins
+                if re.search(rf"\b{re.escape(c['name'].lower())}\b", text)
+                or re.search(rf"\b{re.escape(c['symbol'].lower())}\b", text)]
         if hits:
             out.append((n, hits))
     return out
@@ -380,14 +381,19 @@ if __name__ == "__main__":
         import scalp as scalp_mod  # ленивый импорт: --scalp не всегда нужен, лишняя зависимость от Bybit по умолчанию не тянется
         candidates = [f"{c['symbol'].upper()}USDT" for c in coins if c["symbol"].lower() not in ("usdt", "usdc", "dai", "usds")]
         instruments = scalp_mod.fetch_instruments()  # один запрос: какие пары реально есть на Bybit + их интервал фандинга
-        symbols = [s for s in candidates if s in instruments]
-        skipped = [s for s in candidates if s not in instruments]
-        if skipped:
-            print(colors.dim(f"⚡ пропускаю (не торгуется на Bybit как перпетуум): {', '.join(skipped)}"))
+        if instruments is None:
+            print(colors.dim("⚡ не удалось получить список инструментов Bybit (сеть/блок) — "
+                              "пропускаю предфильтр, пробую все монеты как есть"))
+            symbols, skipped, instruments = candidates, [], {}
+        else:
+            symbols = [s for s in candidates if s in instruments]
+            skipped = [s for s in candidates if s not in instruments]
+            if skipped:
+                print(colors.dim(f"⚡ пропускаю (не торгуется на Bybit как перпетуум): {', '.join(skipped)}"))
         print(f"⚡ сканирую фандинг+1м-осцилляторы на Bybit для {len(symbols)} монет…")
         with ThreadPoolExecutor(max_workers=4) as pool:
             scalp_results = list(pool.map(
-                lambda s: scalp_mod.scan_symbol(s, instruments[s]["funding_interval_min"]), symbols))
+                lambda s: scalp_mod.scan_symbol(s, instruments.get(s, {}).get("funding_interval_min", 480)), symbols))
 
     judged = []
     if args.news:
