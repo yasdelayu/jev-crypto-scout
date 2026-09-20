@@ -56,11 +56,29 @@ to change it. Every 4h is a deliberate middle ground: frequent enough to
 accumulate history for `validate.py` and catch funding/news shifts, gentle
 enough on free-tier API rate limits.
 
+## Interactive bot (optional)
+
+`bot.py` is a long-polling Telegram bot that lets the owner change settings
+and trigger runs from chat. It and the timer share `config.json`, so a change
+in chat also changes the scheduled run.
+
+```bash
+cp deploy/jev-bot.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now jev-bot.service
+systemctl status jev-bot.service        # should be active (running)
+journalctl -u jev-bot.service -f        # watch it
+```
+
+Bot commands (owner only): `/help` `/legend` `/settings` `/run` `/top N`
+`/lang ru|en` `/on <block>` `/off <block>` (blocks: `scalp fng listings ta news`).
+
 ## Updating
 
 ```bash
 cd /opt/jev-crypto-scout && git pull
-# .env and history.db are gitignored, so they survive a pull untouched.
+systemctl restart jev-bot.service       # pick up bot.py changes
+# .env, history.db, config.json are gitignored — they survive a pull.
 ```
 
 ## Security notes
