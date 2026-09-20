@@ -58,11 +58,17 @@ def _fund_dir(z):
     return f"🔴 лонги платят (z={z:+.1f})" if z > 0 else f"🟢 шорты платят (z={z:+.1f})"
 
 
-def format_digest(ranked, judged=None, scalp_results=None, context=None, listings_data=None, top_n=8):
-    """Digest for a phone: market mood, top movers, funding skew, Jev news
-    flags (as clickable links), listings/delistings, and a legend so the
-    colored dots actually mean something to the reader."""
+def format_digest(ranked, judged=None, scalp_results=None, context=None, listings_data=None, priorities=None, top_n=8):
+    """Digest for a phone: Jev's 'what to look at' first (the point of the
+    whole thing), then market mood, top movers, funding skew, Jev news flags
+    (clickable links), listings/delistings, and a legend."""
     lines = ["<b>📊 Jev Crypto Scout</b>"]
+
+    # 'На что смотреть' идёт ПЕРВЫМ — это ответ на «что мне делать с инфой»
+    if priorities:
+        import attention
+        for l in attention.format_attention(priorities, top=5):
+            lines.append(l)
 
     if context and context.get("fear_greed"):
         fg = context["fear_greed"]
@@ -129,8 +135,8 @@ def format_digest(ranked, judged=None, scalp_results=None, context=None, listing
     return "\n".join(lines)
 
 
-def notify(ranked, judged=None, scalp_results=None, context=None, listings_data=None):
-    return _send(format_digest(ranked, judged, scalp_results, context, listings_data))
+def notify(ranked, judged=None, scalp_results=None, context=None, listings_data=None, priorities=None):
+    return _send(format_digest(ranked, judged, scalp_results, context, listings_data, priorities))
 
 
 def send_text(text):
@@ -149,8 +155,10 @@ def selftest():
                         "funding": {"z": 2.1, "next_reset_min": 150}},
                        {"symbol": "BTCUSDT", "candidate": False,
                         "funding": {"z": -0.5, "next_reset_min": 30}}],
-        context={"fear_greed": {"value": 71, "label": "Greed"}, "defi_tvl_usd": 93e9})
+        context={"fear_greed": {"value": 71, "label": "Greed"}, "defi_tvl_usd": 93e9},
+        priorities=[{"symbol": "BTC", "attention": 2.0, "action": "research", "act_conf": 0.8}])
     assert "Jev Crypto Scout" in d
+    assert "На что смотреть" in d and "разобраться" in d  # attention section present, first
     assert "overbought" in d and "BTC" in d
     assert "&amp;" in d and "<thing>" not in d  # escaping
     assert "Фандинг" in d and "z=+2.1" in d  # funding section present with value

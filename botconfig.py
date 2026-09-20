@@ -15,10 +15,11 @@ DEFAULTS = {
     "scalp": True,       # фандинг + минутные осцилляторы Bybit
     "listings": True,    # листинги/делистинги
     "news": True,        # разбор новостей через Jev
+    "attention": True,   # Jev-подсказки «на что смотреть»
     "ta_limit": 30,      # на больших списках осцилляторы/scalp только по N подвижным
 }
 
-BOOL_KEYS = ["ta", "fng", "scalp", "listings", "news"]
+BOOL_KEYS = ["ta", "fng", "scalp", "listings", "news", "attention"]
 
 
 def load():
@@ -49,6 +50,10 @@ def to_argv(cfg):
         argv.append("--listings")
     if cfg.get("news"):
         argv += ["--news", "--lang", cfg.get("lang", "ru")]
+    if cfg.get("attention"):
+        argv.append("--attention")
+        if "--lang" not in argv:  # attention тоже уважает язык, даже если news выкл
+            argv += ["--lang", cfg.get("lang", "ru")]
     return argv
 
 
@@ -58,10 +63,14 @@ def selftest():
     assert "--top" in argv and "100" in argv
     assert "--ta" in argv and "--scalp" in argv and "--listings" in argv
     assert "--news" in argv and "ru" in argv
-    # toggling news off drops --news and --lang
+    # toggling news off drops --news; --lang stays if attention still on
     d["news"] = False
     argv2 = to_argv(d)
-    assert "--news" not in argv2 and "--lang" not in argv2
+    assert "--news" not in argv2 and "--attention" in argv2 and "--lang" in argv2
+    # both off -> no --lang
+    d["attention"] = False
+    argv3 = to_argv(d)
+    assert "--news" not in argv3 and "--attention" not in argv3 and "--lang" not in argv3
     # top respected
     d["top"] = 25
     assert "25" in to_argv(d)

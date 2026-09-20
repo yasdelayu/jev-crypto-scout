@@ -30,7 +30,7 @@ HELP = """<b>🤖 Jev Crypto Scout — бот</b>
 /top 50 — сколько монет отслеживать (по капитализации)
 /lang ru — язык новостей (ru или en)
 /on scalp · /off scalp — включить/выключить блок
-   блоки: <code>scalp fng listings ta news</code>
+   блоки: <code>scalp fng listings ta news attention</code>
 /legend — что значат все значки
 /help — это сообщение
 
@@ -53,6 +53,8 @@ z — насколько сильно перекос отклонён от но�
 Заголовок кликабельный — ведёт на источник
 
 <b>📈/📉</b> — листинг/делистинг монеты на бирже
+
+<b>🎯 На что смотреть</b> — главное: Jev оценивает ситуацию по монете целиком (цена+фандинг+новости разом) и подсказывает шаг: 👀 наблюдать / 🔍 разобраться в причине. Это не совет купить, а куда направить внимание из сотни монет.
 
 <i>Это не сигнал на сделку и не инвестсовет.</i>"""
 
@@ -96,16 +98,34 @@ def send(text):
     telegram_notify.send_text(text)
 
 
+_run_lock = threading.Lock()
+
+
 def run_scout():
     """Trigger a full run with the current config; scout.py sends the digest
-    itself via --telegram. Runs in a thread so polling keeps responding."""
-    cfg = botconfig.load()
-    argv = [sys.executable, os.path.join(HERE, "scout.py")] + botconfig.to_argv(cfg) + ["--log", "--telegram"]
+    itself via --telegram. Runs in a thread so polling keeps responding.
+    Reports failure to the user instead of dying silently (the /run bug:
+    scout hit CoinGecko 429 and check=False swallowed it)."""
+    if not _run_lock.acquire(blocking=False):
+        send("⏳ Прогон уже идёт, подожди его окончания.")
+        return
     try:
+        cfg = botconfig.load()
+        argv = [sys.executable, os.path.join(HERE, "scout.py")] + botconfig.to_argv(cfg) + ["--log", "--telegram"]
         send("⏳ Запускаю прогон, это займёт пару минут…")
-        subprocess.run(argv, cwd=HERE, timeout=600, check=False)
+        r = subprocess.run(argv, cwd=HERE, timeout=900, capture_output=True, text=True)
+        if r.returncode != 0:
+            tail = (r.stderr or r.stdout or "").strip().splitlines()[-1:] or ["неизвестная ошибка"]
+            hint = ""
+            if "429" in (r.stderr or ""):
+                hint = "\nПохоже на лимит запросов к API (CoinGecko). Подожди минуту и снова /run."
+            send(f"⚠️ Прогон не завершился: {tail[0][:200]}{hint}")
+    except subprocess.TimeoutExpired:
+        send("⚠️ Прогон не уложился в 15 минут и был прерван.")
     except Exception as e:
         send(f"⚠️ Прогон упал: {e}")
+    finally:
+        _run_lock.release()
 
 
 def settings_text(cfg):
@@ -117,7 +137,8 @@ def settings_text(cfg):
             f"{on(cfg['fng'])} фон рынка (fng)\n"
             f"{on(cfg['scalp'])} фандинг/скальп (scalp)\n"
             f"{on(cfg['listings'])} листинги (listings)\n"
-            f"{on(cfg['news'])} новости Jev (news)\n\n"
+            f"{on(cfg['news'])} новости Jev (news)\n"
+            f"{on(cfg['attention'])} подсказки «на что смотреть» (attention)\n\n"
             f"Вкл/выкл: /on scalp · /off listings")
 
 

@@ -286,7 +286,7 @@ def rank(coins, judged, osc_map=None):
     return sorted(scored, key=lambda x: (x["news_score"], x["momentum"]), reverse=True)
 
 
-def print_report(ranked, judged, age_map=None, show_osc=False, context=None, scalp_results=None, listings_data=None):
+def print_report(ranked, judged, age_map=None, show_osc=False, context=None, scalp_results=None, listings_data=None, priorities=None):
     if context:
         parts = []
         fg = context.get("fear_greed")
@@ -353,6 +353,15 @@ def print_report(ranked, judged, age_map=None, show_osc=False, context=None, sca
             colored = colors.green(line) if line.startswith("📈") else colors.red(line)
             print("  " + colored)
 
+    if priorities:
+        import attention
+        worth = [p for p in priorities if p["attention"] >= 1.0][:5]
+        if worth:
+            print("\n" + colors.bold("🎯 На что смотреть (Jev оценил ситуацию целиком):"))
+            for p in worth:
+                act = attention.ACTION_LABEL.get(p["action"], p["action"])
+                print(f"  {colors.bold(p['symbol']):<14} {act}  " + colors.dim(f"(уверенность {p['act_conf']:.0%})"))
+
     print(colors.dim("\n⚠️  Это скрининг, не сигнал на сделку. Решение — за тобой."))
 
 
@@ -385,6 +394,8 @@ if __name__ == "__main__":
     p.add_argument("--fng", action="store_true", help="+ Fear&Greed Index и суммарный DeFi TVL (фон рынка)")
     p.add_argument("--listings", action="store_true",
                     help="+ свежие листинги/делистинги с Bybit (без ключа) — крепкий сигнал катализатора")
+    p.add_argument("--attention", action="store_true",
+                    help="+ Jev-подсказки «на что смотреть»: оценивает ситуацию целиком и предлагает шаг (нужен ключ)")
     p.add_argument("--save", help="сохранить сырые данные в JSON")
     p.add_argument("--log", action="store_true",
                     help="дописать этот прогон в history.db (SQLite) — фундамент для validate.py")
@@ -396,12 +407,21 @@ if __name__ == "__main__":
     if args.selftest:
         selftest(); sys.exit()
 
-    if args.coins:
-        print(f"тяну свой список монет: {args.coins}…")
-        coins = fetch_markets(ids=args.coins)
-    else:
-        print(f"тяну топ-{args.top} монет с CoinGecko…")
-        coins = fetch_markets(top_n=args.top)
+    try:
+        if args.coins:
+            print(f"тяну свой список монет: {args.coins}…")
+            coins = fetch_markets(ids=args.coins)
+        else:
+            print(f"тяну топ-{args.top} монет с CoinGecko…")
+            coins = fetch_markets(top_n=args.top)
+    except urllib.error.HTTPError as e:
+        # 429: базовый список монет — единственный незаменимый вызов; без него
+        # прогон бессмыслен. Понятная ошибка + ненулевой код выхода, чтобы бот
+        # сказал пользователю «лимит API», а не молча проглотил (см. bot.run_scout).
+        if e.code == 429:
+            print("CoinGecko вернул 429 (лимит запросов). Подожди минуту и повтори.", file=sys.stderr)
+            sys.exit(2)
+        raise
 
     context = fetch_market_context() if args.fng else None
 
@@ -458,19 +478,29 @@ if __name__ == "__main__":
             scalp_results = list(pool.map(
                 lambda s: scalp_mod.scan_symbol(s, instruments.get(s, {}).get("funding_interval_min", 480)), symbols))
 
-    judged = []
-    if args.news:
+    jev = None
+    if args.news or args.attention:
         provider, key = pick_provider()
         jev = Jev(provider, key)
-        print(f"тяну новости, провайдер Jev: {provider}…")
+
+    judged = []
+    if args.news:
+        print(f"тяну новости, провайдер Jev: {jev.provider}…")
         news = fetch_news(lang=args.lang)
         matched = match_news_to_coins(news, coins)
         print(f"{len(news)} новостей, {len(matched)} касаются отслеживаемых монет — прогоняю через Jev…")
         judged = judge_news(jev, matched, lang=args.lang)
 
     ranked = rank(coins, judged, osc_map)
+
+    priorities = None
+    if args.attention and jev:
+        import attention
+        print("🎯 Jev оценивает, на что смотреть…")
+        priorities = attention.prioritize(jev, ranked, judged, scalp_results, lang=args.lang)
+
     print_report(ranked, judged, age_map, show_osc=args.ta, context=context,
-                 scalp_results=scalp_results, listings_data=listings_data)
+                 scalp_results=scalp_results, listings_data=listings_data, priorities=priorities)
 
     if args.save:
         json.dump({"coins": ranked, "news": judged}, open(args.save, "w"), ensure_ascii=False, indent=1)
@@ -485,7 +515,7 @@ if __name__ == "__main__":
         import telegram_notify
         try:
             telegram_notify.notify(ranked, judged=judged, scalp_results=scalp_results,
-                                   context=context, listings_data=listings_data)
+                                   context=context, listings_data=listings_data, priorities=priorities)
             print("дайджест отправлен в Telegram")
         except Exception as e:
             print(f"не удалось отправить в Telegram: {e}", file=sys.stderr)
