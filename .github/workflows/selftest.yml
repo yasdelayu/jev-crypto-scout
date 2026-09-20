@@ -1,0 +1,20 @@
+name: selftest
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run all offline selftests (no network, no API keys needed)
+        run: |
+          python3 scout.py --selftest
+          python3 scalp.py --selftest
+          python3 indicators.py
+          python3 history.py

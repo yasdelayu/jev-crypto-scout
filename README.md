@@ -44,6 +44,8 @@ retune them without a single new Jev call
 | `scalp.py` | Short-horizon **signal scanner** (not an executor) — funding-rate extremity + 1-minute oscillators on Bybit, with Jev as a news-risk veto |
 | `indicators.py` | RSI / MACD histogram / Bollinger %B / Stochastic %K — pure Python, no TA-Lib |
 | `colors.py` | ANSI terminal colors, auto-off when not a TTY — no dependency |
+| `http_client.py` | One shared HTTP GET with retry/backoff, used by scout.py and scalp.py |
+| `history.py` / `validate.py` | Opt-in SQLite run log (`--log`) and an honest forward-return check against it — not a finished backtest, see the file's own docstring |
 | `jev_client.py` | One client across three Jev providers (TypeSafe / Vercel AI Gateway / Cloudflare Workers AI) |
 
 ## Run it
@@ -114,10 +116,23 @@ stops short of it.
 ## Limitations
 
 - One RSS feed by default — add more to `NEWS_FEEDS` in `scout.py`.
-- News-to-coin matching is a substring filter in code, not Jev — cheap
-  and fast, misses indirect mentions.
+- News-to-coin matching is a word-boundary text filter in code, not Jev —
+  cheap and fast, still misses indirect mentions (a headline naming a
+  product without the coin's own name/ticker).
 - `--age` and `--ta` hit CoinGecko's free-tier rate limit on a large
   `--top`; a dash in the table means a throttled call, not "no data".
+- Bybit's own CloudFront front door has intermittently geo-blocked
+  individual endpoints (`funding/history`, `instruments-info`) from part of
+  our test infrastructure — distinct from Binance's outright `451` and from
+  Bybit's own burst-traffic WAF block, and it comes and goes with routing.
+  `scalp.py` degrades (shows the live rate without history-derived stats)
+  rather than crashing when this happens; see `BybitGeoBlocked` in `scalp.py`.
+- **No signal here has been backtested.** The candidate thresholds (funding
+  z > 1.5, RSI 30/70) were chosen by convention, not validated against
+  history. `history.py` + `validate.py` are the infrastructure for doing
+  that honestly over time (`--log` on real runs) — there isn't yet enough
+  logged data for a verdict, and free-tier API history is too thin/coarse
+  to reconstruct a trustworthy backtest retroactively.
 - Jev's calibration on financial English and on Russian has not been
   verified at scale here — see the broader technology writeup and
   calibration harness referenced in

@@ -283,6 +283,8 @@ if __name__ == "__main__":
     p.add_argument("--news", action="store_true", help="apply the Jev news veto (needs a key)")
     p.add_argument("--lang", choices=["en", "ru"], default="en", help="language of the news questions sent to Jev")
     p.add_argument("--workers", type=int, default=4)
+    p.add_argument("--log", action="store_true",
+                    help="append this run to history.db (SQLite) — foundation for validate.py")
     p.add_argument("--selftest", action="store_true")
     args = p.parse_args()
 
@@ -314,3 +316,8 @@ if __name__ == "__main__":
         results = news_gate(jev, results, name_map, lang=args.lang)
 
     print_report(results)
+
+    if args.log:
+        import history
+        history.log_scalp(results)
+        print(f"logged {sum(1 for r in results if 'error' not in r)} rows to history.db")

@@ -350,6 +350,8 @@ if __name__ == "__main__":
     p.add_argument("--scalp", action="store_true", help="+ сканер фандинга/1м-осцилляторов Bybit на этих же монетах")
     p.add_argument("--fng", action="store_true", help="+ Fear&Greed Index и суммарный DeFi TVL (фон рынка)")
     p.add_argument("--save", help="сохранить сырые данные в JSON")
+    p.add_argument("--log", action="store_true",
+                    help="дописать этот прогон в history.db (SQLite) — фундамент для validate.py")
     p.add_argument("--selftest", action="store_true")
     args = p.parse_args()
 
@@ -411,3 +413,8 @@ if __name__ == "__main__":
     if args.save:
         json.dump({"coins": ranked, "news": judged}, open(args.save, "w"), ensure_ascii=False, indent=1)
         print(f"\nсырые данные -> {args.save}")
+
+    if args.log:
+        import history
+        history.log_scout(ranked)
+        print(f"дописал {len(ranked)} строк в history.db")
