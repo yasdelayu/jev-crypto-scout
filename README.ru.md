@@ -1,5 +1,10 @@
 # Jev Crypto Scout
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![Без зависимостей](https://img.shields.io/badge/зависимости-нет-brightgreen.svg)](#запуск)
+[![Не финансовый совет](https://img.shields.io/badge/не-финсовет-red.svg)](ARCHITECTURE.md)
+
 **[English version](README.md)**
 
 Скрининг монет: количественные сигналы считаются в коде на реальных
@@ -8,6 +13,7 @@
 [Jev](https://typesafe.ai), модель TypeSafe класса System One. Честный
 разбор того, что это умеет и не умеет, включая скальпинг-модуль — в
 [ARCHITECTURE.md](ARCHITECTURE.md) (на английском, основной язык доков репо).
+**[USAGE.ru.md](USAGE.ru.md) — простая шпаргалка «хочу X → запускаю это → зачем».**
 
 **Не торговый бот и не инвестсовет.** Ничего не покупает, не продаёт и
 не выдаёт торговый сигнал — печатает таблицу, которую читает человек.
@@ -49,7 +55,8 @@ python3 scout.py --coins bitcoin,pepe,fartcoin      # свой список вм
 python3 scout.py --top 30 --age --ta                # + возраст монет + осцилляторы
 python3 scout.py --top 30 --fng                     # + Fear&Greed Index, DeFi TVL (фон рынка)
 python3 scout.py --top 30 --scalp                   # + сканер фандинга/1м-осцилляторов Bybit на тех же монетах
-python3 scout.py --top 30 --news                    # + классификация новостей через Jev (нужен ключ)
+python3 scout.py --top 30 --news                    # + классификация новостей через Jev (нужен ключ), вопросы на английском (дефолт)
+python3 scout.py --top 30 --news --lang ru           # то же самое, но вопросы Jev — на русском
 
 python3 scalp.py --symbols BTCUSDT,ETHUSDT,SOLUSDT          # фандинг + минутные осцилляторы, отдельно
 python3 scalp.py --symbols BTCUSDT --news                    # + вето Jev по новостям

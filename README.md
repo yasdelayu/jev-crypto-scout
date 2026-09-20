@@ -1,12 +1,18 @@
 # Jev Crypto Scout
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![No dependencies](https://img.shields.io/badge/dependencies-none-brightgreen.svg)](#run-it)
+[![Not financial advice](https://img.shields.io/badge/not-financial%20advice-red.svg)](ARCHITECTURE.md)
+
 **[Русская версия](README.ru.md)**
 
 Crypto screening: quantitative signals computed in code from real market
 data (CoinGecko, Bybit); qualitative news judgment (sentiment / catalyst
 type / confirmed-vs-rumor) via [Jev](https://typesafe.ai), TypeSafe's
 System One model. See [ARCHITECTURE.md](ARCHITECTURE.md) for the honest
-version of what this can and cannot do, including the scalping module.
+version of what this can and cannot do, including the scalping module, and
+**[USAGE.md](USAGE.md) for a plain "I want X → run this → why" guide.**
 
 **Not a trading bot and not investment advice.** It buys nothing, sells
 nothing, and issues no trade signal — it prints a table a human reads.
@@ -49,6 +55,7 @@ python3 scout.py --top 30 --age --ta                # + coin age + oscillators
 python3 scout.py --top 30 --fng                     # + Fear&Greed Index, DeFi TVL (market mood)
 python3 scout.py --top 30 --scalp                   # + Bybit funding/1m-oscillator scan, same coins
 python3 scout.py --top 30 --news                    # + Jev news classification (needs a key)
+python3 scout.py --top 30 --news --lang ru           # same, but questions asked in Russian
 
 python3 scalp.py --symbols BTCUSDT,ETHUSDT,SOLUSDT          # funding + 1m oscillators, standalone
 python3 scalp.py --symbols BTCUSDT --news                    # + Jev news veto
