@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from jev_client import Jev, pick_provider
+import indicators
 
 COINGECKO = "https://api.coingecko.com/api/v3"
 NEWS_FEEDS = ["https://cointelegraph.com/rss"]  # ponytail: один надёжный фид; больше — добавь в список
@@ -62,6 +63,56 @@ def fetch_genesis_dates(coin_ids, workers=5):
             return cid, None
     with ThreadPoolExecutor(max_workers=workers) as pool:
         return dict(pool.map(one, coin_ids))
+
+
+def fetch_oscillators(coins, pace_seconds=1.3):
+    """Осцилляторы TradingView-стиля (RSI/MACD/Bollinger/Stochastic), считаем сами
+    по свечам CoinGecko OHLC (бесплатно, без ключа, есть high/low — для Stochastic
+    этого мало у markets-эндпоинта, но хватает у /ohlc).
+
+    ponytail: изначально пробовали Binance klines (public-apis подсказал) — тот же
+    контент, но у него 451 Unavailable For Legal Reasons с части IP (геоблок биржи).
+    CoinGecko работает без гео-ограничений, но free-тир жёстко лимитирует по частоте:
+    пачка параллельных запросов быстро ловит 429 без восстановления в разумный бэкофф.
+    Поэтому здесь — последовательно, с паузой между вызовами, не пул потоков. Для
+    --top 30+ это минута-другая; для скрининга, не realtime-цены, это нормально.
+    """
+    out = {}
+    for i, coin in enumerate(coins):
+        if i > 0:
+            time.sleep(pace_seconds)
+        try:
+            url = f"{COINGECKO}/coins/{coin['id']}/ohlc?vs_currency=usd&days=30"
+            req = urllib.request.Request(url, headers={"User-Agent": "jev-crypto-scout/1"})
+            kl = None
+            for attempt in range(4):
+                try:
+                    with urllib.request.urlopen(req, timeout=15) as r:
+                        kl = json.load(r)
+                    break
+                except urllib.error.HTTPError as e:
+                    if e.code == 429 and attempt < 3:
+                        time.sleep(5 * (attempt + 1))
+                        continue
+                    raise
+            if not isinstance(kl, list) or len(kl) < 30:
+                out[coin["symbol"].upper()] = None
+                continue
+            highs = [float(c[2]) for c in kl]
+            lows = [float(c[3]) for c in kl]
+            closes = [float(c[4]) for c in kl]
+            rsi_v = indicators.rsi(closes)
+            stoch_v = indicators.stochastic_k(highs, lows, closes)
+            out[coin["symbol"].upper()] = {
+                "rsi": rsi_v,
+                "macd_hist": indicators.macd_histogram(closes),
+                "boll_b": indicators.bollinger_percent_b(closes),
+                "stoch": stoch_v,
+                "signal": indicators.read_signal(rsi_v, stoch_v),
+            }
+        except Exception:
+            out[coin["symbol"].upper()] = None  # редкая монета без OHLC-истории или сеть подвела
+    return out
 
 
 def coin_age_years(genesis_date):
@@ -137,7 +188,7 @@ def judge_news(jev, matched, workers=4):
 SENTIMENT_WEIGHT = {"bullish": 1, "neutral": 0, "bearish": -1}
 
 
-def rank(coins, judged):
+def rank(coins, judged, osc_map=None):
     """Ранжирование — в коде. Веса и формула здесь, не в модели: их можно
     поменять без единого нового запроса к Jev (composite scoring, см. документ)."""
     news_by_symbol = {}
@@ -151,21 +202,34 @@ def rank(coins, judged):
         news = news_by_symbol.get(c["symbol"].upper(), [])
         news_score = sum(SENTIMENT_WEIGHT[n["sentiment"]] * n["confirmed"] for n in news)
         momentum = (q["pct_24h"] or 0) * 0.3 + (q["pct_7d"] or 0) * 0.7
+        osc = (osc_map or {}).get(c["symbol"].upper())
         scored.append({**c, **q, "news_score": round(news_score, 2),
-                       "news_count": len(news), "momentum": round(momentum, 2)})
+                       "news_count": len(news), "momentum": round(momentum, 2), "osc": osc})
     return sorted(scored, key=lambda x: (x["news_score"], x["momentum"]), reverse=True)
 
 
-def print_report(ranked, judged, age_map=None):
+def print_report(ranked, judged, age_map=None, show_osc=False):
+    osc_cols = f"{'RSI':>6}{'MACD':>8}{'%B':>6}{'Stoch':>7}{'сигнал':>11}" if show_osc else ""
     print(f"\n{'#':<3}{'монета':<8}{'капа':>16}{'24ч%':>8}{'7д%':>8}{'от ATH%':>10}"
-          f"{'vol/mcap':>10}{'возраст':>9}{'новости':>9}")
+          f"{'vol/mcap':>10}{'возраст':>9}{'новости':>9}{osc_cols}")
     for i, c in enumerate(ranked[:30], 1):
         age = age_map.get(c["id"]) if age_map else None
         age_s = f"{coin_age_years(age)}л" if age else "—"
-        print(f"{i:<3}{c['symbol'].upper():<8}{c['market_cap']:>16,}"
-              f"{(c['pct_24h'] or 0):>8.1f}{(c['pct_7d'] or 0):>8.1f}"
-              f"{(c['dist_from_ath_pct'] or 0):>10.1f}{(c['vol_to_mcap'] or 0):>10.3f}"
-              f"{age_s:>9}{c['news_score']:>9.1f}")
+        line = (f"{i:<3}{c['symbol'].upper():<8}{c['market_cap']:>16,}"
+                f"{(c['pct_24h'] or 0):>8.1f}{(c['pct_7d'] or 0):>8.1f}"
+                f"{(c['dist_from_ath_pct'] or 0):>10.1f}{(c['vol_to_mcap'] or 0):>10.3f}"
+                f"{age_s:>9}{c['news_score']:>9.1f}")
+        if show_osc:
+            o = c.get("osc")
+            if o:
+                line += (f"{(o['rsi'] if o['rsi'] is not None else 0):>6.0f}"
+                         f"{(o['macd_hist'] if o['macd_hist'] is not None else 0):>8.2f}"
+                         f"{(o['boll_b'] if o['boll_b'] is not None else 0):>6.2f}"
+                         f"{(o['stoch'] if o['stoch'] is not None else 0):>7.0f}"
+                         f"{o['signal']:>11}")
+            else:
+                line += f"{'—':>6}{'—':>8}{'—':>6}{'—':>7}{'':>11}"
+        print(line)
     if judged:
         print(f"\nНовости, разобранные Jev ({len(judged)}):")
         for j in sorted(judged, key=lambda x: -x["confirmed"])[:15]:
@@ -193,6 +257,7 @@ if __name__ == "__main__":
     p.add_argument("--top", type=int, default=30, help="сколько монет по капитализации брать")
     p.add_argument("--news", action="store_true", help="разбирать новости через Jev (нужен ключ)")
     p.add_argument("--age", action="store_true", help="подтягивать возраст монет (доп. запросы к CoinGecko)")
+    p.add_argument("--ta", action="store_true", help="осцилляторы RSI/MACD/Bollinger/Stochastic по свечам Binance")
     p.add_argument("--save", help="сохранить сырые данные в JSON")
     p.add_argument("--selftest", action="store_true")
     args = p.parse_args()
@@ -209,6 +274,11 @@ if __name__ == "__main__":
         print(f"тяну дату рождения для {len(shortlist)} самых подвижных монет…")
         age_map = fetch_genesis_dates(shortlist)
 
+    osc_map = None
+    if args.ta:
+        print(f"тяну свечи CoinGecko OHLC и считаю осцилляторы для {len(coins)} монет…")
+        osc_map = fetch_oscillators(coins)
+
     judged = []
     if args.news:
         provider, key = pick_provider()
@@ -219,8 +289,8 @@ if __name__ == "__main__":
         print(f"{len(news)} новостей, {len(matched)} касаются отслеживаемых монет — прогоняю через Jev…")
         judged = judge_news(jev, matched)
 
-    ranked = rank(coins, judged)
-    print_report(ranked, judged, age_map)
+    ranked = rank(coins, judged, osc_map)
+    print_report(ranked, judged, age_map, show_osc=args.ta)
 
     if args.save:
         json.dump({"coins": ranked, "news": judged}, open(args.save, "w"), ensure_ascii=False, indent=1)

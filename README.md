@@ -34,11 +34,21 @@ Jev — это паттерн [composite scoring](https://docs.typesafe.ai/patte
 ```
 CoinGecko /coins/markets  →  quant_signals()  (в коде: %24ч/7д/30д, vol/mcap, % от ATH)
 CoinGecko /coins/{id}     →  coin_age_years()  (в коде: возраст по genesis_date, шортлист)
+CoinGecko /coins/{id}/ohlc →  fetch_oscillators()  (в коде: RSI/MACD/Bollinger/Stochastic, indicators.py)
 Cointelegraph RSS         →  match_news_to_coins()  (в коде: дешёвый фильтр по подстроке)
                            →  judge_news()  (Jev: sentiment + catalyst + confirmed, 1 запрос/новость)
                            →  rank()  (в коде: веса, сортировка)
                            →  print_report()
 ```
+
+**Осцилляторы (`--ta`) — тоже чистый код, не Jev.** RSI, MACD-гистограмма, %B
+Боллинджера, Stochastic %K — стандартные формулы в `indicators.py`, без
+TA-Lib и вообще без внешних зависимостей. Свечи берём с CoinGecko OHLC:
+пробовали сперва Binance (бесплатно, без ключа — подсказка из
+[public-apis](https://github.com/public-apis/public-apis)), но у части IP
+Binance отдаёт `451 Unavailable For Legal Reasons` (геоблок биржи).
+CoinGecko OHLC работает без гео-ограничений, но free-тир жёстко лимитирует
+частоту — поэтому `--ta` тянет свечи последовательно с паузой, не пачкой.
 
 `jev_client.py` — трёхпровайдерный клиент Jev (нативный TypeSafe / Vercel AI
 Gateway / Cloudflare Workers AI), с нормализацией расхождений между ними
@@ -51,8 +61,10 @@ pip install --user 2>/dev/null || true   # зависимостей нет, то
 
 python3 scout.py --top 30                       # только количественный скрининг, без Jev
 python3 scout.py --top 30 --age                  # + возраст самых подвижных монет
+python3 scout.py --top 30 --ta                   # + осцилляторы RSI/MACD/Bollinger/Stochastic
 python3 scout.py --top 30 --news                 # + новости через Jev (нужен ключ)
 python3 scout.py --selftest                      # без сети
+python3 indicators.py                            # selftest осцилляторов отдельно
 ```
 
 Ключ Jev — любой из трёх:
@@ -87,6 +99,10 @@ Jev-образной обёртке, не сам Jev, но проверяет в
   Дёшево и быстро, но пропустит непрямые упоминания.
 - Возраст (`--age`) тянется по одной монете за раз с CoinGecko — только для
   шортлиста самых подвижных, не для всего топа (упрётесь в rate limit free-тира).
+- `--ta` тоже упирается в free-тир CoinGecko: пара «—» в колонках осцилляторов —
+  это честный прочерк после исчерпанных ретраев на 429, не баг и не «нет данных
+  вообще». Для стабильности на большом `--top` — свой платный ключ CoinGecko
+  или Binance-подобный источник без геоблока.
 - Калибровка Jev на русскоязычном и финансовом английском контенте не
   верифицирована на большой выборке — см. более общий разбор технологии и
   замерялку калибровки в [typesafe-ai/skills](https://github.com/typesafe-ai/skills)
