@@ -1,109 +1,107 @@
-# Jev Crypto Scout — скрининг монет: цифры в коде, суждения через Jev
+# Jev Crypto Scout
 
-Скрининг топ-монет по капитализации: количественные сигналы (цена, объём, дистанция
-от ATH, возраст монеты) считаются в коде на реальных данных CoinGecko. Новости
-разбираются моделью [Jev](https://typesafe.ai) от TypeSafe (тональность / тип
-катализатора / подтверждённость), а не читаются и не суммируются — Jev не
-генерирует текст, только типизированные суждения.
+**[Русская версия](README.ru.md)**
 
-**Не торговый бот и не инвестсовет.** Ничего не покупает, не продаёт, не даёт
-сигналов на сделку. Печатает таблицу, которую смотрит человек.
+Crypto screening: quantitative signals computed in code from real market
+data (CoinGecko, Bybit); qualitative news judgment (sentiment / catalyst
+type / confirmed-vs-rumor) via [Jev](https://typesafe.ai), TypeSafe's
+System One model. See [ARCHITECTURE.md](ARCHITECTURE.md) for the honest
+version of what this can and cannot do, including the scalping module.
+
+**Not a trading bot and not investment advice.** It buys nothing, sells
+nothing, and issues no trade signal — it prints a table a human reads.
 
 ---
 
-## Почему так, а не иначе
+## Why it's built this way
 
-Jev не умеет в математику — это прямо в его собственной документации
-(«Math and Numbers», [jaggedness](https://docs.typesafe.ai/model-jaggedness/jev-1.13)):
-не считает надёжно и плохо работает с числовыми представлениями. Поэтому здесь
-Jev **не считает индикаторы**. Все проценты, отношения объёма к капе, дистанция
-от ATH — обычная арифметика в `quant_signals()`, без единого обращения к модели.
+Jev cannot do math reliably — that's in TypeSafe's own docs
+([jaggedness §2, "Math and Numbers"](https://docs.typesafe.ai/model-jaggedness/jev-1.13)).
+So Jev never computes an indicator here. Every percentage, ratio, RSI,
+MACD histogram, funding z-score is plain arithmetic in `indicators.py` /
+`scout.py` / `scalp.py`, on real numbers from CoinGecko and Bybit — zero
+model calls involved.
 
-Jev берётся только там, где нужна семантика естественного языка: понять, что
-новость про санкции — это `bearish`/`regulation`, а сплит ETF — `bullish`. Три
-вопроса (тональность, катализатор, подтверждённость) уходят в **одном** запросе на
-новость — [speculative fan-out](https://docs.typesafe.ai/patterns/fan-out), а не
-три отдельных вызова.
+Jev is used only where natural-language judgment is the actual task:
+is this news item bullish or bearish, what kind of event is it, how
+confirmed is it. One request per news item covers three questions at
+once ([speculative fan-out](https://docs.typesafe.ai/patterns/fan-out)).
+Ranking weights live in code (`rank()`), not in the model — you can
+retune them without a single new Jev call
+([composite scoring](https://docs.typesafe.ai/patterns/composite-scoring)).
 
-Веса и формула ранжирования — в коде (`rank()`), не в модели. Поменять баланс
-между новостным фоном и ценовым моментумом можно без единого нового обращения к
-Jev — это паттерн [composite scoring](https://docs.typesafe.ai/patterns/composite-scoring).
+## What's in the repo
 
-## Устройство
+| File | What |
+|---|---|
+| `scout.py` | Top-N coins by market cap: momentum, ATH distance, vol/mcap, coin age, oscillators, Jev-classified news |
+| `scalp.py` | Short-horizon **signal scanner** (not an executor) — funding-rate extremity + 1-minute oscillators on Bybit, with Jev as a news-risk veto |
+| `indicators.py` | RSI / MACD histogram / Bollinger %B / Stochastic %K — pure Python, no TA-Lib |
+| `jev_client.py` | One client across three Jev providers (TypeSafe / Vercel AI Gateway / Cloudflare Workers AI) |
 
-```
-CoinGecko /coins/markets  →  quant_signals()  (в коде: %24ч/7д/30д, vol/mcap, % от ATH)
-CoinGecko /coins/{id}     →  coin_age_years()  (в коде: возраст по genesis_date, шортлист)
-CoinGecko /coins/{id}/ohlc →  fetch_oscillators()  (в коде: RSI/MACD/Bollinger/Stochastic, indicators.py)
-Cointelegraph RSS         →  match_news_to_coins()  (в коде: дешёвый фильтр по подстроке)
-                           →  judge_news()  (Jev: sentiment + catalyst + confirmed, 1 запрос/новость)
-                           →  rank()  (в коде: веса, сортировка)
-                           →  print_report()
-```
-
-**Осцилляторы (`--ta`) — тоже чистый код, не Jev.** RSI, MACD-гистограмма, %B
-Боллинджера, Stochastic %K — стандартные формулы в `indicators.py`, без
-TA-Lib и вообще без внешних зависимостей. Свечи берём с CoinGecko OHLC:
-пробовали сперва Binance (бесплатно, без ключа — подсказка из
-[public-apis](https://github.com/public-apis/public-apis)), но у части IP
-Binance отдаёт `451 Unavailable For Legal Reasons` (геоблок биржи).
-CoinGecko OHLC работает без гео-ограничений, но free-тир жёстко лимитирует
-частоту — поэтому `--ta` тянет свечи последовательно с паузой, не пачкой.
-
-`jev_client.py` — трёхпровайдерный клиент Jev (нативный TypeSafe / Vercel AI
-Gateway / Cloudflare Workers AI), с нормализацией расхождений между ними
-(`noul` ↔ `boolean` ↔ `probability`, `input_tokens` ↔ `inputTokens`).
-
-## Запуск
+## Run it
 
 ```bash
-pip install --user 2>/dev/null || true   # зависимостей нет, только stdlib
+python3 scout.py --top 30                # quant screening only, no Jev
+python3 scout.py --top 30 --age --ta      # + coin age + oscillators
+python3 scout.py --top 30 --news          # + Jev news classification (needs a key)
 
-python3 scout.py --top 30                       # только количественный скрининг, без Jev
-python3 scout.py --top 30 --age                  # + возраст самых подвижных монет
-python3 scout.py --top 30 --ta                   # + осцилляторы RSI/MACD/Bollinger/Stochastic
-python3 scout.py --top 30 --news                 # + новости через Jev (нужен ключ)
-python3 scout.py --selftest                      # без сети
-python3 indicators.py                            # selftest осцилляторов отдельно
+python3 scalp.py --symbols BTCUSDT,ETHUSDT,SOLUSDT          # funding + 1m oscillators
+python3 scalp.py --symbols BTCUSDT --news                    # + Jev news veto
+
+python3 scout.py --selftest && python3 scalp.py --selftest && python3 indicators.py
 ```
 
-Ключ Jev — любой из трёх:
+A Jev key, any of the three:
 
 ```bash
 export AI_GATEWAY_API_KEY=vck_...                                   # Vercel
-export TYPESAFE_API_KEY=...                                          # нативный
+export TYPESAFE_API_KEY=...                                          # native
 export CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=...            # Cloudflare
 ```
 
-Без ключа `--news` завершается понятной ошибкой, а не падает. Для дымового
-теста конвейера без ключа вообще — `JEV_PROVIDER=demo` (открытая модель в
-Jev-образной обёртке, не сам Jev, но проверяет весь путь RSS→фильтр→разбор).
+No key, no crash — `--news` fails with a clear message, not a traceback.
+`JEV_PROVIDER=demo` runs the full pipeline against a free open-model
+stand-in (not real Jev, but proves the wiring end to end with no key at all).
 
-## Пример вывода
+## What the scalp module actually is
 
-```
-#  монета              капа    24ч%     7д%   от ATH%  vol/mcap  новости
-1  BTC     1,629,576,499,053    -0.4     5.4     -35.7     0.015      3.8
-2  ZEC       24,588,758,525    -2.7    32.9     -54.5     0.043      3.1
+Two independent signals, both plain arithmetic, both from Bybit's public
+v5 API (no key needed for market data):
 
-Новости, разобранные Jev:
-  BTC   [bearish/regulation/conf=2.0]   US sanctions Iran's BitBank...
-  ZEC   [bullish/other/conf=1.8]        Grayscale's Zcash ETF files for 3-for-1 split
-  ADA   [bearish/hack_exploit/conf=1.7] Cardano's IOG warns of YouTube hijack
-```
+- **funding extremity** — how many standard deviations today's perp
+  funding rate sits from its own recent history. A persistently high
+  positive rate means longs are crowded and paying shorts.
+- **1-minute oscillators** — the same RSI/Stochastic formulas as `--ta`,
+  just on a much shorter timeframe.
 
-## Ограничения
+A candidate needs **both** pointing the same direction at once — either
+alone is noise. Jev enters exactly once per surviving candidate, as a
+**veto**, not a predictor: is there a very recent, high-confidence,
+bearish/regulatory news item about this symbol? If yes, the candidate is
+suppressed — a funding/RSI extreme means nothing if the real driver is a
+hack or a regulatory action no oscillator can see.
 
-- Один RSS-фид (Cointelegraph) — добавь свои в `NEWS_FEEDS`.
-- Фильтр «новость ↔ монета» — подстрока по названию/тикеру в коде, не Jev.
-  Дёшево и быстро, но пропустит непрямые упоминания.
-- Возраст (`--age`) тянется по одной монете за раз с CoinGecko — только для
-  шортлиста самых подвижных, не для всего топа (упрётесь в rate limit free-тира).
-- `--ta` тоже упирается в free-тир CoinGecko: пара «—» в колонках осцилляторов —
-  это честный прочерк после исчерпанных ретраев на 429, не баг и не «нет данных
-  вообще». Для стабильности на большом `--top` — свой платный ключ CoinGecko
-  или Binance-подобный источник без геоблока.
-- Калибровка Jev на русскоязычном и финансовом английском контенте не
-  верифицирована на большой выборке — см. более общий разбор технологии и
-  замерялку калибровки в [typesafe-ai/skills](https://github.com/typesafe-ai/skills)
-  и документации TypeSafe.
+This is a screening aid on a minutes-scale polling loop, not a live
+execution system. See [ARCHITECTURE.md](ARCHITECTURE.md) for what real
+scalping infrastructure actually requires and why this repo deliberately
+stops short of it.
+
+## Data sources
+
+- [CoinGecko](https://coingecko.com) — market data, OHLC, no key needed
+- [Bybit v5](https://bybit-exchange.github.io/docs/v5/intro) — funding rate, 1m klines, no key needed for market data. Chosen over Binance, which returned `451 Unavailable For Legal Reasons` from part of our test infrastructure (exchange geo-blocking)
+- [Cointelegraph RSS](https://cointelegraph.com/rss) — news source for the Jev classification step
+- [CoinMarketCap](https://coinmarketcap.com/api/) — optional alternate market-data source. `listings/latest` works **keyless** (live-verified), `quotes/latest` does not (403 without a key). See `cmc.py`
+
+## Limitations
+
+- One RSS feed by default — add more to `NEWS_FEEDS` in `scout.py`.
+- News-to-coin matching is a substring filter in code, not Jev — cheap
+  and fast, misses indirect mentions.
+- `--age` and `--ta` hit CoinGecko's free-tier rate limit on a large
+  `--top`; a dash in the table means a throttled call, not "no data".
+- Jev's calibration on financial English and on Russian has not been
+  verified at scale here — see the broader technology writeup and
+  calibration harness referenced in
+  [typesafe-ai/skills](https://github.com/typesafe-ai/skills).
