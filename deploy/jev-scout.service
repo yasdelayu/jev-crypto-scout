@@ -1,0 +1,11 @@
+[Unit]
+Description=Jev Crypto Scout — scheduled screening run
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/jev-crypto-scout
+ExecStart=/opt/jev-crypto-scout/deploy/run.sh
+# A single run is short; if the network hangs, don't let it pile up.
+TimeoutStartSec=600

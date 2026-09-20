@@ -352,6 +352,8 @@ if __name__ == "__main__":
     p.add_argument("--save", help="сохранить сырые данные в JSON")
     p.add_argument("--log", action="store_true",
                     help="дописать этот прогон в history.db (SQLite) — фундамент для validate.py")
+    p.add_argument("--telegram", action="store_true",
+                    help="отправить краткий дайджест в Telegram (нужны TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID)")
     p.add_argument("--selftest", action="store_true")
     args = p.parse_args()
 
@@ -418,3 +420,11 @@ if __name__ == "__main__":
         import history
         history.log_scout(ranked)
         print(f"дописал {len(ranked)} строк в history.db")
+
+    if args.telegram:
+        import telegram_notify
+        try:
+            telegram_notify.notify(ranked, judged=judged, scalp_results=scalp_results, context=context)
+            print("дайджест отправлен в Telegram")
+        except Exception as e:
+            print(f"не удалось отправить в Telegram: {e}", file=sys.stderr)

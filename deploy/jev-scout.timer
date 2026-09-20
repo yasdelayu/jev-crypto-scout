@@ -1,0 +1,13 @@
+[Unit]
+Description=Run Jev Crypto Scout every 4 hours
+
+[Timer]
+# Every 4 hours, on the hour. Frequent enough to accumulate history for
+# validate.py and to catch funding/news shifts, gentle enough on free-tier
+# API rate limits. Change OnCalendar to taste.
+OnCalendar=*-*-* 00/4:00:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target
