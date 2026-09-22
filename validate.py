@@ -77,20 +77,40 @@ def _mean(xs):
     return sum(xs) / len(xs) if xs else None
 
 
+def _var(xs, m):
+    return sum((x - m) ** 2 for x in xs) / (len(xs) - 1) if len(xs) > 1 else 0.0
+
+
+def _ztest(sig, base):
+    """Two-sample z of (mean_sig - mean_base). |z|>1.96 ≈ p<0.05: the edge is
+    unlikely to be random. No scipy — plain formula, and with crypto's fat
+    tails treat it as a rough guide, not gospel. Returns (z, significant)."""
+    if len(sig) < 5 or len(base) < 5:
+        return None, False
+    ms, mb = _mean(sig), _mean(base)
+    se = (_var(sig, ms) / len(sig) + _var(base, mb) / len(base)) ** 0.5
+    if se == 0:
+        return None, False
+    z = (ms - mb) / se
+    return z, abs(z) > 1.96
+
+
 def compute(conn, horizon_h=24):
     base = baseline_move(conn, horizon_h)
     base_mean = _mean(base)
     checks = []
     specs = [
-        ("oversold (RSI)", "signal='oversold'", signal_move(conn, horizon_h, "signal='oversold'")),
-        ("overbought (RSI)", "signal='overbought'", signal_move(conn, horizon_h, "signal='overbought'")),
-        ("Jev: research", None, attention_move(conn, horizon_h, "research")),
-        ("Jev: watch", None, attention_move(conn, horizon_h, "watch")),
+        ("oversold (RSI)", signal_move(conn, horizon_h, "signal='oversold'")),
+        ("overbought (RSI)", signal_move(conn, horizon_h, "signal='overbought'")),
+        ("Jev: research", attention_move(conn, horizon_h, "research")),
+        ("Jev: watch", attention_move(conn, horizon_h, "watch")),
     ]
-    for label, _, moves in specs:
+    for label, moves in specs:
         m = _mean(moves)
         edge = (m - base_mean) if (m is not None and base_mean is not None) else None
-        checks.append({"label": label, "n": len(moves), "mean": m, "edge": edge})
+        z, sig = _ztest(moves, base)
+        checks.append({"label": label, "n": len(moves), "mean": m, "edge": edge,
+                       "z": z, "significant": sig})
     return {"horizon_h": horizon_h, "baseline_n": len(base), "baseline_mean": base_mean, "checks": checks}
 
 
@@ -101,16 +121,19 @@ def report(res, min_samples):
         print("разнесённых во времени. Загляни через день-другой накопления.")
         return
     print(f"База (случайная монета): среднее {res['baseline_mean']:+.2f}% (n={res['baseline_n']})\n")
-    print(f"{'сигнал':<20}{'n':>5}{'ср.движение':>14}{'EDGE vs база':>16}")
+    print(f"{'сигнал':<20}{'n':>5}{'EDGE vs база':>14}{'z':>8}{'значимо':>9}")
     for c in res["checks"]:
         if c["n"] < min_samples:
             print(f"{c['label']:<20}{c['n']:>5}   мало данных (нужно ≥{min_samples})")
             continue
         edge = f"{c['edge']:+.2f}%" if c["edge"] is not None else "—"
-        print(f"{c['label']:<20}{c['n']:>5}{c['mean']:>13.2f}%{edge:>16}")
-    print("\nEDGE > 0 значит сигнал бил случайный выбор на этих данных. EDGE около 0 или")
-    print("отрицательный — сигнал НЕ даёт преимущества, не взвешивай его сильнее прочих.")
-    print("Одно среднее — не доказательство: нужен объём и проверка значимости.")
+        zs = f"{c['z']:+.2f}" if c["z"] is not None else "—"
+        sig = "ДА ✓" if c["significant"] else "нет"
+        print(f"{c['label']:<20}{c['n']:>5}{edge:>14}{zs:>8}{sig:>9}")
+    print("\nEDGE > 0 = сигнал бил случайный выбор. Но EDGE без значимости — это ещё")
+    print("не преимущество: |z|>1.96 (значимо ✓) означает, что перевес вряд ли случаен")
+    print("(~95%). Пока «значимо = нет» — доверять сигналу как эджу рано, сколько бы")
+    print("ни было среднее. У крипты толстые хвосты — даже значимость тут ориентир, не гарантия.")
 
 
 def summary_text(res, min_samples=20):
@@ -127,12 +150,19 @@ def summary_text(res, min_samples=20):
             lines.append(f"<code>{c['label']:<16}</code> n={c['n']} — мало данных")
             continue
         any_verdict = True
-        edge = c["edge"]
-        mark = "✅" if (edge or 0) > 0.5 else ("➖" if abs(edge or 0) <= 0.5 else "❌")
-        lines.append(f"{mark} <code>{c['label']:<16}</code> edge {edge:+.2f}% (n={c['n']})")
+        edge = c["edge"] or 0
+        # значимость решает: зелёная галка только если эдж И статзначим
+        if c["significant"] and edge > 0:
+            mark = "✅"
+        elif c["significant"] and edge < 0:
+            mark = "❌"
+        else:
+            mark = "➖"  # не значимо — пока шум, не доверять
+        zs = f", z={c['z']:+.1f}" if c["z"] is not None else ""
+        lines.append(f"{mark} <code>{c['label']:<16}</code> edge {edge:+.2f}%{zs} (n={c['n']})")
     if any_verdict:
-        lines.append("\n<i>EDGE>0 = сигнал бил случайность на этих данных. "
-                     "Чем больше n, тем надёжнее.</i>")
+        lines.append("\n<i>✅ = эдж есть И он статистически значим (|z|&gt;1.96, ~95%). "
+                     "➖ = перевес пока может быть случайным, доверять рано.</i>")
     else:
         lines.append("\n<i>Вердиктов пока нет — копим данные (`--log` идёт автоматически).</i>")
     return "\n".join(lines)
@@ -151,9 +181,17 @@ def selftest():
     res = compute(conn, horizon_h=24)
     osig = next(c for c in res["checks"] if c["label"].startswith("oversold"))
     assert osig["n"] == 1 and abs(osig["mean"] - 10.0) < 1e-6, osig
+    assert osig["significant"] is False, "n=1 can't be significant"  # z-test needs n>=5
     attn = next(c for c in res["checks"] if c["label"] == "Jev: research")
     assert attn["n"] == 1 and abs(attn["mean"] - 10.0) < 1e-6, attn
     assert "Самопроверка" in summary_text(res)
+    # z-test math: two well-separated spread samples are significant
+    sig_sample = [4, 5, 6, 5, 4, 6, 5, 4, 6, 5]   # mean 5
+    base_sample = [-1, 0, 1, 0, -1, 1, 0, -1, 1, 0]  # mean 0
+    z, sig = _ztest(sig_sample, base_sample)
+    assert sig and z and z > 2, (z, sig)
+    z2, sig2 = _ztest([1, 2, 3], [1, 2, 3])  # too few
+    assert not sig2
     print("validate selftest ok")
 
 

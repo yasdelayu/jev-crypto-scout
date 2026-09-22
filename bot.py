@@ -32,7 +32,8 @@ HELP = """<b>🤖 Jev Crypto Scout — бот</b>
 /lang ru — язык новостей (ru или en)
 /on scalp · /off scalp — включить/выключить блок
    блоки: <code>scalp fng listings ta news attention</code>
-/stats — самопроверка: работают ли сигналы (по накопленной истории)
+/stats — самопроверка: есть ли у сигналов эдж (со значимостью)
+/paper — демо-счёт: вырос бы виртуальный баланс по правилу
 /legend — что значат все значки
 /help — это сообщение
 
@@ -175,6 +176,14 @@ def handle(text):
             conn.close()
         except Exception as e:
             send(f"⚠️ Не удалось посчитать статистику: {e}")
+    elif cmd == "paper":
+        try:
+            import paper
+            conn = paper.history.connect()
+            send(paper.summary_text(paper.simulate(conn, 24)))
+            conn.close()
+        except Exception as e:
+            send(f"⚠️ Не удалось посчитать демо-счёт: {e}")
     elif cmd == "settings":
         send(settings_text(cfg))
     elif cmd == "run":

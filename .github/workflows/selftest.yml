@@ -24,3 +24,4 @@ jobs:
           python3 bot.py --selftest
           python3 attention.py
           python3 validate.py --selftest
+          python3 paper.py --selftest
