@@ -32,6 +32,7 @@ HELP = """<b>🤖 Jev Crypto Scout — бот</b>
 /lang ru — язык новостей (ru или en)
 /on scalp · /off scalp — включить/выключить блок
    блоки: <code>scalp fng listings ta news attention</code>
+/stats — самопроверка: работают ли сигналы (по накопленной истории)
 /legend — что значат все значки
 /help — это сообщение
 
@@ -162,6 +163,18 @@ def handle(text):
         send(HELP)
     elif cmd == "legend":
         send(LEGEND)
+    elif cmd == "stats":
+        try:
+            import validate
+            conn = validate.history.connect()
+            total = conn.execute("SELECT COUNT(*) FROM scout_runs").fetchone()[0]
+            if total == 0:
+                send("📈 История пуста. Прогоны копятся автоматически — загляни через день-два.")
+            else:
+                send(validate.summary_text(validate.compute(conn, 24)))
+            conn.close()
+        except Exception as e:
+            send(f"⚠️ Не удалось посчитать статистику: {e}")
     elif cmd == "settings":
         send(settings_text(cfg))
     elif cmd == "run":

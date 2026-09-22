@@ -23,3 +23,4 @@ jobs:
           python3 botconfig.py
           python3 bot.py --selftest
           python3 attention.py
+          python3 validate.py --selftest

@@ -508,8 +508,16 @@ if __name__ == "__main__":
 
     if args.log:
         import history
-        history.log_scout(ranked)
-        print(f"дописал {len(ranked)} строк в history.db")
+        conn = history.connect()
+        history.log_scout(ranked, conn=conn)
+        if scalp_results:
+            history.log_scalp(scalp_results, conn=conn)
+        if priorities:
+            history.log_attention(priorities, conn=conn)
+        conn.close()
+        print(f"дописал в history.db: {len(ranked)} монет"
+              + (f", {len([r for r in scalp_results if 'error' not in r])} scalp" if scalp_results else "")
+              + (f", {len(priorities)} attention" if priorities else ""))
 
     if args.telegram:
         import telegram_notify

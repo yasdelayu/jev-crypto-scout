@@ -1,79 +1,183 @@
-"""Reads history.db and asks the one question this repo could not honestly
-answer before it existed: after a coin was flagged oversold/overbought, or
-a scalp candidate fired, what actually happened to its price N hours later?
+"""Self-check: reads history.db and asks whether the signals actually predict
+anything — the honest answer to 'что с этим делать'. You act on a signal only
+to the degree it has beaten random on YOUR accumulated data, not because a
+tweet said 81ms and Kelly sizing.
 
-This is NOT a finished backtest, and it says so loudly on purpose. A real
-backtest needs weeks-to-months of point-in-time data across many coins;
-CoinGecko's free OHLC only goes back in coarse multi-day candles and
-Bybit's funding history has been intermittently geo-blocked from this
-session's network (see scalp.py's BybitGeoBlocked). Reconstructing history
-retroactively from those free, rate-limited APIs and calling it a backtest
-would be exactly the kind of overconfident, unvalidated claim this whole
-exercise is supposed to avoid. The honest path is: log every real run
-(`--log` on scout.py/scalp.py) starting today, and only trust this script's
-output once it has real weeks of accumulated data to work with.
+The one number that matters is EDGE: a signal's average forward move MINUS the
+baseline (the average forward move of ALL coins over the same horizon). If a
+signal's forward return isn't clearly better than just picking any coin, it
+has no edge and you shouldn't weight it — no matter how confident the model
+sounded. This is the opposite of Kelly-betting on a model's raw confidence.
 
-    python3 validate.py                 # reads history.db, reports what it can
-    python3 validate.py --min-samples 30  # raise the bar before printing a verdict
+NOT a finished backtest. Free-tier point-in-time data is thin; a real verdict
+needs weeks of logged runs. Until then this prints n= and withholds a verdict
+below --min-samples. The honest path is: keep logging (`--log`), check back.
+
+    python3 validate.py                    # human-readable report
+    python3 validate.py --json             # machine summary (bot /stats uses this)
+    python3 validate.py --min-samples 30
 """
 import argparse
 import history
 
 
-def forward_move(conn, symbol, after_ts, horizon_seconds, table="scout_runs", price_col="price"):
-    """The next logged price for this symbol at least `horizon_seconds` after
-    `after_ts` — None if nothing that far ahead has been logged yet."""
+def _forward_price(conn, symbol, after_ts, horizon_s):
     row = conn.execute(
-        f"SELECT {price_col} FROM {table} WHERE symbol=? AND ts>=? ORDER BY ts ASC LIMIT 1",
-        (symbol, after_ts + horizon_seconds)).fetchone()
+        "SELECT price FROM scout_runs WHERE symbol=? AND ts>=? AND price IS NOT NULL ORDER BY ts ASC LIMIT 1",
+        (symbol, after_ts + horizon_s)).fetchone()
     return row[0] if row else None
 
 
-def evaluate_scout_signal(conn, horizon_hours=24):
-    """For every logged 'oversold'/'overbought' reading, find its actual
-    forward price move once enough time has passed. Returns per-signal
-    sample counts and mean forward % move — the raw material for a verdict,
-    not a verdict by itself (see min-samples gate in __main__)."""
-    rows = conn.execute(
-        "SELECT symbol, ts, price, signal FROM scout_runs WHERE signal IN ('oversold','overbought')").fetchall()
-    out = {"oversold": [], "overbought": []}
-    for symbol, ts, price, signal in rows:
+def _price_at(conn, symbol, ts):
+    row = conn.execute(
+        "SELECT price FROM scout_runs WHERE symbol=? AND ts=? AND price IS NOT NULL LIMIT 1",
+        (symbol, ts)).fetchone()
+    return row[0] if row else None
+
+
+def baseline_move(conn, horizon_h):
+    """Average forward % move of every logged (coin, time) point — what you'd
+    get picking coins at random. The bar every signal must clear."""
+    rows = conn.execute("SELECT symbol, ts, price FROM scout_runs WHERE price IS NOT NULL").fetchall()
+    moves = []
+    for symbol, ts, price in rows:
+        fwd = _forward_price(conn, symbol, ts, horizon_h * 3600)
+        if fwd:
+            moves.append((fwd - price) / price * 100)
+    return moves
+
+
+def signal_move(conn, horizon_h, where):
+    """Forward moves for scout rows matching `where` (e.g. signal='oversold')."""
+    rows = conn.execute(f"SELECT symbol, ts, price FROM scout_runs WHERE price IS NOT NULL AND {where}").fetchall()
+    moves = []
+    for symbol, ts, price in rows:
+        fwd = _forward_price(conn, symbol, ts, horizon_h * 3600)
+        if fwd:
+            moves.append((fwd - price) / price * 100)
+    return moves
+
+
+def attention_move(conn, horizon_h, action):
+    """Forward moves after Jev flagged a coin with a given action, priced from
+    the scout row at the same timestamp (attention_runs has no price of its own)."""
+    rows = conn.execute("SELECT symbol, ts FROM attention_runs WHERE action=?", (action,)).fetchall()
+    moves = []
+    for symbol, ts in rows:
+        price = _price_at(conn, symbol, ts)
         if not price:
             continue
-        fwd = forward_move(conn, symbol, ts, horizon_hours * 3600)
-        if fwd is not None:
-            out[signal].append((fwd - price) / price * 100)
-    return out
+        fwd = _forward_price(conn, symbol, ts, horizon_h * 3600)
+        if fwd:
+            moves.append((fwd - price) / price * 100)
+    return moves
 
 
-def report(moves, horizon_hours, min_samples):
-    for signal, values in moves.items():
-        n = len(values)
-        if n < min_samples:
-            print(f"{signal:>12}: n={n} — below --min-samples ({min_samples}), no verdict printed. "
-                  f"Keep logging runs (`--log`) and re-run this later.")
+def _mean(xs):
+    return sum(xs) / len(xs) if xs else None
+
+
+def compute(conn, horizon_h=24):
+    base = baseline_move(conn, horizon_h)
+    base_mean = _mean(base)
+    checks = []
+    specs = [
+        ("oversold (RSI)", "signal='oversold'", signal_move(conn, horizon_h, "signal='oversold'")),
+        ("overbought (RSI)", "signal='overbought'", signal_move(conn, horizon_h, "signal='overbought'")),
+        ("Jev: research", None, attention_move(conn, horizon_h, "research")),
+        ("Jev: watch", None, attention_move(conn, horizon_h, "watch")),
+    ]
+    for label, _, moves in specs:
+        m = _mean(moves)
+        edge = (m - base_mean) if (m is not None and base_mean is not None) else None
+        checks.append({"label": label, "n": len(moves), "mean": m, "edge": edge})
+    return {"horizon_h": horizon_h, "baseline_n": len(base), "baseline_mean": base_mean, "checks": checks}
+
+
+def report(res, min_samples):
+    print(f"Горизонт: {res['horizon_h']}ч вперёд")
+    if res["baseline_mean"] is None:
+        print("Пока нет пар «сигнал → цена спустя горизонт». Нужно больше прогонов с --log,")
+        print("разнесённых во времени. Загляни через день-другой накопления.")
+        return
+    print(f"База (случайная монета): среднее {res['baseline_mean']:+.2f}% (n={res['baseline_n']})\n")
+    print(f"{'сигнал':<20}{'n':>5}{'ср.движение':>14}{'EDGE vs база':>16}")
+    for c in res["checks"]:
+        if c["n"] < min_samples:
+            print(f"{c['label']:<20}{c['n']:>5}   мало данных (нужно ≥{min_samples})")
             continue
-        mean = sum(values) / n
-        print(f"{signal:>12}: n={n}  mean {horizon_hours}h forward move: {mean:+.2f}%")
-    print("\nA mean move alone is not significance — with real sample size, follow up with")
-    print("a proper test (e.g. compare against the unconditional mean move for all coins,")
-    print("same period) before trusting this as an edge. This script gives you the raw")
-    print("numbers; it does not run that test for you.")
+        edge = f"{c['edge']:+.2f}%" if c["edge"] is not None else "—"
+        print(f"{c['label']:<20}{c['n']:>5}{c['mean']:>13.2f}%{edge:>16}")
+    print("\nEDGE > 0 значит сигнал бил случайный выбор на этих данных. EDGE около 0 или")
+    print("отрицательный — сигнал НЕ даёт преимущества, не взвешивай его сильнее прочих.")
+    print("Одно среднее — не доказательство: нужен объём и проверка значимости.")
+
+
+def summary_text(res, min_samples=20):
+    """Compact HTML for the bot /stats command."""
+    lines = [f"<b>📈 Самопроверка ({res['horizon_h']}ч вперёд)</b>"]
+    if res["baseline_mean"] is None:
+        lines.append("Пока мало данных — нужно больше прогонов, разнесённых во времени. "
+                     "Система копит историю; загляни через день-два.")
+        return "\n".join(lines)
+    lines.append(f"База (случайная монета): {res['baseline_mean']:+.2f}% (n={res['baseline_n']})\n")
+    any_verdict = False
+    for c in res["checks"]:
+        if c["n"] < min_samples:
+            lines.append(f"<code>{c['label']:<16}</code> n={c['n']} — мало данных")
+            continue
+        any_verdict = True
+        edge = c["edge"]
+        mark = "✅" if (edge or 0) > 0.5 else ("➖" if abs(edge or 0) <= 0.5 else "❌")
+        lines.append(f"{mark} <code>{c['label']:<16}</code> edge {edge:+.2f}% (n={c['n']})")
+    if any_verdict:
+        lines.append("\n<i>EDGE>0 = сигнал бил случайность на этих данных. "
+                     "Чем больше n, тем надёжнее.</i>")
+    else:
+        lines.append("\n<i>Вердиктов пока нет — копим данные (`--log` идёт автоматически).</i>")
+    return "\n".join(lines)
+
+
+def selftest():
+    import time as _t
+    conn = history.connect(":memory:")
+    now = int(_t.time())
+    # два момента: t0 (сигнал oversold, цена 100) и t0+25ч (цена 110 = +10%)
+    conn.execute("INSERT INTO scout_runs (ts,symbol,price,signal) VALUES (?,?,?,?)", (now, "BTC", 100.0, "oversold"))
+    conn.execute("INSERT INTO scout_runs (ts,symbol,price,signal) VALUES (?,?,?,?)", (now + 25*3600, "BTC", 110.0, None))
+    conn.execute("INSERT INTO attention_runs (ts,symbol,attention,action,act_conf) VALUES (?,?,?,?,?)",
+                 (now, "BTC", 2.0, "research", 0.9))
+    conn.commit()
+    res = compute(conn, horizon_h=24)
+    osig = next(c for c in res["checks"] if c["label"].startswith("oversold"))
+    assert osig["n"] == 1 and abs(osig["mean"] - 10.0) < 1e-6, osig
+    attn = next(c for c in res["checks"] if c["label"] == "Jev: research")
+    assert attn["n"] == 1 and abs(attn["mean"] - 10.0) < 1e-6, attn
+    assert "Самопроверка" in summary_text(res)
+    print("validate selftest ok")
 
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--horizon-hours", type=int, default=24)
-    p.add_argument("--min-samples", type=int, default=20,
-                    help="don't print a verdict for a signal with fewer logged instances than this")
+    p.add_argument("--min-samples", type=int, default=20)
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--selftest", action="store_true")
     args = p.parse_args()
-
-    conn = history.connect()
-    total = conn.execute("SELECT COUNT(*) FROM scout_runs").fetchone()[0]
-    if total == 0:
-        print("history.db is empty. Run scout.py/scalp.py with --log a few times "
-              "(ideally on a schedule, over days-to-weeks) before this has anything to say.")
+    if args.selftest:
+        selftest()
     else:
-        print(f"{total} logged scout rows so far.")
-        report(evaluate_scout_signal(conn, args.horizon_hours), args.horizon_hours, args.min_samples)
-    conn.close()
+        conn = history.connect()
+        total = conn.execute("SELECT COUNT(*) FROM scout_runs").fetchone()[0]
+        if total == 0:
+            print("history.db пуст. Прогоны с --log идут автоматически (бот/таймер) — "
+                  "загляни сюда через день-два накопления.")
+        else:
+            res = compute(conn, args.horizon_hours)
+            if args.json:
+                import json
+                print(json.dumps(res, ensure_ascii=False))
+            else:
+                print(f"{total} записей scout в истории.\n")
+                report(res, args.min_samples)
+        conn.close()

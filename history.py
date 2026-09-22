@@ -33,6 +33,14 @@ CREATE TABLE IF NOT EXISTS scalp_runs (
     funding_z REAL, rsi_1m REAL, stoch_1m REAL, candidate INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_scalp_symbol_ts ON scalp_runs(symbol, ts);
+
+CREATE TABLE IF NOT EXISTS attention_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    symbol TEXT NOT NULL,
+    attention REAL, action TEXT, act_conf REAL
+);
+CREATE INDEX IF NOT EXISTS idx_attn_symbol_ts ON attention_runs(symbol, ts);
 """
 
 
@@ -73,12 +81,31 @@ def log_scalp(results, conn=None):
         conn.close()
 
 
+def log_attention(priorities, conn=None):
+    """One row per coin Jev rated — so validate.py can later check whether a
+    high-attention 'research'/'watch' call was followed by a real move."""
+    own = conn is None
+    conn = conn or connect()
+    ts = int(time.time())
+    conn.executemany(
+        "INSERT INTO attention_runs (ts, symbol, attention, action, act_conf) VALUES (?,?,?,?,?)",
+        [(ts, p["symbol"].upper(), p.get("attention"), p.get("action"), p.get("act_conf"))
+         for p in (priorities or [])])
+    conn.commit()
+    if own:
+        conn.close()
+
+
 def selftest():
     conn = connect(":memory:")
     log_scout([{"symbol": "btc", "current_price": 100, "pct_24h": 1.0, "pct_7d": 2.0,
                 "osc": {"rsi": 25, "stoch": 10, "signal": "oversold"}, "news_score": 0.5}], conn=conn)
     rows = conn.execute("SELECT symbol, signal FROM scout_runs").fetchall()
     assert rows == [("BTC", "oversold")], rows
+
+    log_attention([{"symbol": "eth", "attention": 2.0, "action": "research", "act_conf": 0.9}], conn=conn)
+    arow = conn.execute("SELECT symbol, action FROM attention_runs").fetchall()
+    assert arow == [("ETH", "research")], arow
 
     log_scalp([{"symbol": "ETHUSDT", "funding": {"z": 2.1}, "osc": {"rsi": 71, "stoch": 88},
                 "candidate": True},
