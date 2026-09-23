@@ -19,7 +19,12 @@ import argparse
 import history
 
 START_BALANCE = 10_000.0   # виртуальные $
-RISK_PER_TRADE = 0.10      # 10% счёта на сделку, без плеча (демо, консервативно)
+RISK_PCT = 0.01            # РИСК на сделку: 1% капитала теряется, ЕСЛИ сработал стоп
+STOP_PCT = 0.03           # стоп-лосс: 3% против позиции от входа
+# Размер позиции вычисляется из этих двух (риск = размер × расстояние_до_стопа),
+# а НЕ «X% капитала». Это тот самый урок из видео Standard Deviation: риск —
+# это сколько теряешь при стопе, не сколько актива покупаешь. Так потеря по
+# любой сделке ограничена RISK_PCT капитала, а размер подстраивается под стоп.
 
 
 def _price_after(conn, symbol, after_ts, horizon_s):
@@ -30,9 +35,15 @@ def _price_after(conn, symbol, after_ts, horizon_s):
 
 
 def simulate(conn, horizon_h=24):
-    """Replay the mean-reversion rule over every logged oversold/overbought
-    signal that already has a matching exit price `horizon_h` later. Returns
-    the trade list and account stats."""
+    """Replay the mean-reversion rule with PROPER risk management: each trade
+    risks a fixed RISK_PCT of capital, capped by a STOP_PCT stop-loss. Position
+    size follows from that, not the other way round. A trade closes at the stop
+    (loss = RISK_PCT) if price moved STOP_PCT against it by the horizon,
+    otherwise at the horizon price.
+
+    We only have prices at log points (every ~4h), not ticks, so 'stop hit'
+    is checked at the horizon, not intrabar — an approximation, stated plainly,
+    but far honester than the old 'N% of capital per trade'."""
     rows = conn.execute(
         "SELECT symbol, ts, price, signal FROM scout_runs "
         "WHERE signal IN ('oversold','overbought') AND price IS NOT NULL ORDER BY ts ASC").fetchall()
@@ -43,12 +54,20 @@ def simulate(conn, horizon_h=24):
         if not exit_price:
             continue  # позиция ещё «открыта» — нет цены выхода в истории
         direction = 1 if signal == "oversold" else -1  # long / short
-        ret = direction * (exit_price - entry) / entry   # доходность сделки
-        pnl = balance * RISK_PER_TRADE * ret
+        raw_ret = direction * (exit_price - entry) / entry
+        # риск-$ фиксирован; размер такой, что движение на STOP_PCT = потеря RISK_PCT
+        risk_dollars = balance * RISK_PCT
+        if raw_ret <= -STOP_PCT:
+            pnl = -risk_dollars                       # стоп: теряем ровно заложенный риск
+            realized_ret = -STOP_PCT
+        else:
+            pnl = risk_dollars * (raw_ret / STOP_PCT)  # прибыль/убыток в единицах риска (R)
+            realized_ret = raw_ret
         balance += pnl
-        wins += ret > 0
+        wins += realized_ret > 0
         trades.append({"symbol": symbol, "signal": signal, "dir": "long" if direction > 0 else "short",
-                       "entry": entry, "exit": exit_price, "ret_pct": ret * 100, "pnl": pnl})
+                       "entry": entry, "exit": exit_price, "ret_pct": realized_ret * 100,
+                       "pnl": pnl, "stopped": raw_ret <= -STOP_PCT})
     n = len(trades)
     return {
         "horizon_h": horizon_h, "trades": n,
@@ -56,13 +75,15 @@ def simulate(conn, horizon_h=24):
         "pnl": round(balance - START_BALANCE, 2),
         "pnl_pct": round((balance / START_BALANCE - 1) * 100, 2),
         "winrate": round(wins / n * 100, 1) if n else None,
+        "stops": sum(1 for t in trades if t["stopped"]),
+        "risk_pct": RISK_PCT, "stop_pct": STOP_PCT,
         "closed": trades,
     }
 
 
 def report(r):
-    print(f"<Демо-счёт> правило: mean-reversion по RSI, горизонт {r['horizon_h']}ч, "
-          f"{RISK_PER_TRADE:.0%} счёта/сделку, без плеча\n")
+    print(f"<Демо-счёт> mean-reversion по RSI, горизонт {r['horizon_h']}ч, "
+          f"риск {r['risk_pct']:.0%}/сделку, стоп {r['stop_pct']:.0%} (риск = потеря при стопе, не размер позиции)\n")
     if r["trades"] == 0:
         print("Пока нет закрытых сделок: нужны сигналы с ценой входа И выхода спустя горизонт.")
         print("Копится автоматически — загляни через день-два.")
@@ -70,8 +91,10 @@ def report(r):
     print(f"старт: ${r['start']:,.0f}  →  сейчас: ${r['balance']:,.0f}  "
           f"({r['pnl_pct']:+.2f}%, ${r['pnl']:+,.0f})")
     print(f"сделок: {r['trades']}  винрейт: {r['winrate']}%\n")
+    print(f"из них закрыто по стопу: {r['stops']}\n")
     for t in r["closed"][-10:]:
-        print(f"  {t['symbol']:<8} {t['dir']:<5} {t['ret_pct']:+6.2f}%  ${t['pnl']:+8.2f}")
+        st = " СТОП" if t["stopped"] else ""
+        print(f"  {t['symbol']:<8} {t['dir']:<5} {t['ret_pct']:+6.2f}%  ${t['pnl']:+8.2f}{st}")
     print("\nЭто виртуальный счёт по ФИКСИРОВАННОМУ правилу на реальных ценах — не сделки,")
     print("не Kelly, не автоторговля. Растёт демо-баланс — у правила есть смысл; падает —")
     print("правило не работает, и хорошо, что проверили на бумаге, а не на деньгах.")
@@ -85,7 +108,8 @@ def summary_text(r):
     emoji = "🟢" if r["pnl"] >= 0 else "🔴"
     lines.append(f"{emoji} <b>${r['balance']:,.0f}</b> из ${r['start']:,.0f} "
                  f"({r['pnl_pct']:+.2f}%)")
-    lines.append(f"сделок: {r['trades']} · винрейт: {r['winrate']}%")
+    lines.append(f"сделок: {r['trades']} · винрейт: {r['winrate']}% · по стопу: {r['stops']}")
+    lines.append(f"<i>риск {r['risk_pct']:.0%}/сделку, стоп {r['stop_pct']:.0%} — риск = потеря при стопе, не размер позиции</i>")
     lines.append("\n<i>Виртуальные деньги, реальные цены, фиксированное правило. "
                  "Не сделки и не автоторговля — проверка стратегии на бумаге.</i>")
     return "\n".join(lines)
@@ -103,9 +127,17 @@ def selftest():
     assert r["trades"] == 1, r
     t = r["closed"][0]
     assert t["dir"] == "long" and abs(t["ret_pct"] - 10.0) < 1e-6, t
-    # +10% on 10% of 10000 = +100
-    assert abs(r["pnl"] - 100.0) < 1e-6, r["pnl"]
-    assert r["winrate"] == 100.0
+    # +10% raw, no stop; pnl in R = risk(1% of 10000=100) * (0.10/0.03) = 333.33
+    assert abs(r["pnl"] - 333.33) < 0.1, r["pnl"]
+    assert r["winrate"] == 100.0 and r["stops"] == 0
+
+    # risk-management core: a move to the stop loses EXACTLY risk_pct of capital
+    conn2 = history.connect(":memory:")
+    conn2.execute("INSERT INTO scout_runs (ts,symbol,price,signal) VALUES (?,?,?,?)", (now, "X", 100.0, "oversold"))
+    conn2.execute("INSERT INTO scout_runs (ts,symbol,price,signal) VALUES (?,?,?,?)", (now + 25*3600, "X", 97.0, None))  # -3% = stop
+    conn2.commit()
+    rs = simulate(conn2, 24)
+    assert rs["stops"] == 1 and abs(rs["pnl"] - (-100.0)) < 1e-6, rs["pnl"]  # lost exactly 1% of 10000
 
     # overbought -> short, price up = loss
     conn.execute("INSERT INTO scout_runs (ts,symbol,price,signal) VALUES (?,?,?,?)", (now, "ETH", 100.0, "overbought"))
