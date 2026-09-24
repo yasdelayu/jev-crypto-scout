@@ -138,9 +138,10 @@ def format_funding_note(f):
     the answer to 'фандинг минута — а кто кому платит, как давно, когда конец'."""
     m = f["next_reset_min"]
     reset = f"{m // 60}ч{m % 60:02d}м" if m >= 60 else f"{m}м"
+    rate = f"ставка {f['current']*100:+.3f}%" if f.get("current") is not None else ""
     if f.get("history_unavailable"):
-        return f"{f['direction']} · история недоступна (Bybit geo-block) · сброс через {reset}"
-    return f"{f['direction']} · {f['streak_periods']}×{f['interval_hours']:.0f}ч подряд · сброс через {reset}"
+        return f"{f['direction']} · {rate} · история недоступна (Bybit geo-block) · сброс через {reset}"
+    return f"{f['direction']} · {rate} · z={f['z']:+.1f} ({f['streak_periods']}×{f['interval_hours']:.0f}ч подряд) · сброс через {reset}"
 
 
 def short_horizon_oscillators(symbol, interval="1", limit=120):
@@ -260,11 +261,11 @@ def selftest():
     assert streak_of([0.0, 0.1], 0) == 1  # zero breaks a positive streak immediately
 
     # human-readable note formats without crashing on edge values
-    note = format_funding_note({"direction": "лонги платят шортам", "streak_periods": 3,
-                                 "interval_hours": 8.0, "next_reset_min": 222})  # 222м = 3ч42м
-    assert "сброс через 3ч42м" in note, note
-    note0 = format_funding_note({"direction": "нейтрально", "streak_periods": 0,
-                                  "interval_hours": 8.0, "next_reset_min": 5})
+    note = format_funding_note({"direction": "лонги платят шортам", "streak_periods": 3, "z": 2.1,
+                                 "current": 0.0001, "interval_hours": 8.0, "next_reset_min": 222})  # 222м
+    assert "сброс через 3ч42м" in note and "ставка +0.010%" in note and "z=+2.1" in note, note
+    note0 = format_funding_note({"direction": "нейтрально", "streak_periods": 0, "z": 0.0,
+                                  "current": 0.0, "interval_hours": 8.0, "next_reset_min": 5})
     assert "сброс через 5м" in note0, note0
 
     # candidate logic in isolation

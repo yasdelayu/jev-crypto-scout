@@ -51,11 +51,18 @@ def _arrow(v):
     return f"🟢+{v:.1f}%" if v >= 0 else f"🔴{v:.1f}%"
 
 
-def _fund_dir(z):
-    """Short who-pays-whom from the signed funding z-score."""
+def _fund_dir(f):
+    """Who-pays-whom, with BOTH the real funding rate (%, what Bybit shows you)
+    and the z-score (how unusual that rate is vs its own recent history). They
+    are different numbers: rate is the actual payment, z is the anomaly."""
+    z = f.get("z")
+    rate = f.get("current")
+    rate_str = f"{rate*100:+.3f}%" if rate is not None else "?"
     if z is None:
-        return "·"
-    return f"🔴 лонги платят (z={z:+.1f})" if z > 0 else f"🟢 шорты платят (z={z:+.1f})"
+        who = "🔴 лонги платят" if (rate or 0) > 0 else "🟢 шорты платят"
+        return f"{who} ({rate_str})"
+    who = "🔴 лонги платят" if z > 0 else "🟢 шорты платят"
+    return f"{who} ({rate_str}, z={z:+.1f})"
 
 
 def format_digest(ranked, judged=None, scalp_results=None, context=None, listings_data=None, priorities=None, top_n=8):
@@ -99,7 +106,7 @@ def format_digest(ranked, judged=None, scalp_results=None, context=None, listing
                 f = r["funding"]
                 reset = f" · сброс {f['next_reset_min']//60}ч{f['next_reset_min']%60:02d}м" if f.get("next_reset_min") else ""
                 star = " 🎯" if r.get("candidate") else ""
-                lines.append(f"<code>{html.escape(r['symbol'].replace('USDT','')):<6}</code> {_fund_dir(f['z'])}{reset}{star}")
+                lines.append(f"<code>{html.escape(r['symbol'].replace('USDT','')):<6}</code> {_fund_dir(f)}{reset}{star}")
         if cands:
             lines.append("<i>🎯 = кандидат: фандинг И осциллятор экстремальны разом</i>")
 
