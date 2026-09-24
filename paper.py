@@ -34,11 +34,11 @@ def _price_after(conn, symbol, after_ts, horizon_s):
     return (row[0], row[1]) if row else (None, None)
 
 
-def simulate(conn, horizon_h=24):
+def simulate(conn, horizon_h=24, stop_pct=STOP_PCT, risk_pct=RISK_PCT):
     """Replay the mean-reversion rule with PROPER risk management: each trade
-    risks a fixed RISK_PCT of capital, capped by a STOP_PCT stop-loss. Position
+    risks a fixed risk_pct of capital, capped by a stop_pct stop-loss. Position
     size follows from that, not the other way round. A trade closes at the stop
-    (loss = RISK_PCT) if price moved STOP_PCT against it by the horizon,
+    (loss = risk_pct) if price moved stop_pct against it by the horizon,
     otherwise at the horizon price.
 
     We only have prices at log points (every ~4h), not ticks, so 'stop hit'
@@ -55,19 +55,19 @@ def simulate(conn, horizon_h=24):
             continue  # позиция ещё «открыта» — нет цены выхода в истории
         direction = 1 if signal == "oversold" else -1  # long / short
         raw_ret = direction * (exit_price - entry) / entry
-        # риск-$ фиксирован; размер такой, что движение на STOP_PCT = потеря RISK_PCT
-        risk_dollars = balance * RISK_PCT
-        if raw_ret <= -STOP_PCT:
+        # риск-$ фиксирован; размер такой, что движение на stop_pct = потеря risk_pct
+        risk_dollars = balance * risk_pct
+        if raw_ret <= -stop_pct:
             pnl = -risk_dollars                       # стоп: теряем ровно заложенный риск
-            realized_ret = -STOP_PCT
+            realized_ret = -stop_pct
         else:
-            pnl = risk_dollars * (raw_ret / STOP_PCT)  # прибыль/убыток в единицах риска (R)
+            pnl = risk_dollars * (raw_ret / stop_pct)  # прибыль/убыток в единицах риска (R)
             realized_ret = raw_ret
         balance += pnl
         wins += realized_ret > 0
         trades.append({"symbol": symbol, "signal": signal, "dir": "long" if direction > 0 else "short",
                        "entry": entry, "exit": exit_price, "ret_pct": realized_ret * 100,
-                       "pnl": pnl, "stopped": raw_ret <= -STOP_PCT})
+                       "pnl": pnl, "stopped": raw_ret <= -stop_pct})
     n = len(trades)
     return {
         "horizon_h": horizon_h, "trades": n,
@@ -76,9 +76,18 @@ def simulate(conn, horizon_h=24):
         "pnl_pct": round((balance / START_BALANCE - 1) * 100, 2),
         "winrate": round(wins / n * 100, 1) if n else None,
         "stops": sum(1 for t in trades if t["stopped"]),
-        "risk_pct": RISK_PCT, "stop_pct": STOP_PCT,
+        "risk_pct": risk_pct, "stop_pct": stop_pct,
         "closed": trades,
     }
+
+
+def compare_stops(conn, horizon_h=24, stops=(0.02, 0.03, 0.05), risk_pct=RISK_PCT):
+    """Same trades, different stop-loss %. Shows how much the stop alone moves
+    the outcome — the video's whole point that risk management, not the signal,
+    drives survival."""
+    return [{"stop_pct": s, **{k: simulate(conn, horizon_h, s, risk_pct)[k]
+                               for k in ("pnl_pct", "winrate", "stops", "trades")}}
+            for s in stops]
 
 
 def report(r):
@@ -153,6 +162,9 @@ def selftest():
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--horizon-hours", type=int, default=24)
+    p.add_argument("--stop", type=float, default=STOP_PCT * 100, help="стоп-лосс в %% (напр. 2, 3, 5)")
+    p.add_argument("--risk", type=float, default=RISK_PCT * 100, help="риск на сделку в %% капитала")
+    p.add_argument("--compare", action="store_true", help="сравнить стопы 2/3/5%% на тех же сделках")
     p.add_argument("--json", action="store_true")
     p.add_argument("--selftest", action="store_true")
     args = p.parse_args()
@@ -160,10 +172,17 @@ if __name__ == "__main__":
         selftest()
     else:
         conn = history.connect()
-        r = simulate(conn, args.horizon_hours)
-        if args.json:
-            import json
-            print(json.dumps(r, ensure_ascii=False))
+        if args.compare:
+            rows = compare_stops(conn, args.horizon_hours, risk_pct=args.risk / 100)
+            print(f"Сравнение стопов (риск {args.risk:.0f}%/сделку, горизонт {args.horizon_hours}ч, те же сделки):\n")
+            print(f"{'стоп':>6}{'P&L':>10}{'винрейт':>10}{'по стопу':>10}{'сделок':>9}")
+            for x in rows:
+                print(f"{x['stop_pct']*100:>5.0f}%{x['pnl_pct']:>9.2f}%{(x['winrate'] or 0):>9.1f}%{x['stops']:>10}{x['trades']:>9}")
         else:
-            report(r)
+            r = simulate(conn, args.horizon_hours, args.stop / 100, args.risk / 100)
+            if args.json:
+                import json
+                print(json.dumps(r, ensure_ascii=False))
+            else:
+                report(r)
         conn.close()
