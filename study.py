@@ -8,6 +8,8 @@
     python3 study.py settlement # robustness of the post-settlement move: more history,
                                 # entry delay, exits, fees+slippage, splits, halves
     python3 study.py ticks      # same on tick data (public.bybit.com): entry +0.25s…+30s
+    python3 study.py fresh      # funding JUST turned anomalous (premium index, 5m): enter,
+                                # exit before the payout — with the crowd vs against it
     python3 study.py --selftest
 
 Only public market data, no keys. Run from a network Bybit doesn't geo-block.
@@ -19,11 +21,13 @@ import scalp
 MSK = 3  # UTC+3
 
 
-def klines(sym, interval, start_ms, end_ms, limit=1000):
-    """[(ts_ms, open, high, low, close)] oldest-first, paging backwards."""
+def klines(sym, interval, start_ms, end_ms, limit=1000, kind="kline"):
+    """[(ts_ms, open, high, low, close)] oldest-first, paging backwards.
+    kind="premium-index-price-kline" gives the premium index (what the next
+    funding rate is computed from) in the same shape."""
     out, end = [], end_ms
     while end > start_ms:
-        rows = scalp.get_json(f"{scalp.BYBIT}/market/kline?category=linear&symbol={sym}"
+        rows = scalp.get_json(f"{scalp.BYBIT}/market/{kind}?category=linear&symbol={sym}"
                               f"&interval={interval}&start={start_ms}&end={end}&limit={limit}")["list"]
         if not rows:
             break
@@ -349,6 +353,88 @@ def settlement_ticks(min_abs=0.001, pages=3, max_files=160, per_symbol=12):
             print(f"  {label:<18} выход T+30с: {stats_line([m['early'][30] for m in sub])}")
 
 
+# ---------- свежая аномалия фандинга: вход, выход ДО выплаты ----------
+
+FRESH_THR = (0.001, 0.002, 0.005)   # |premium index| на базе 8ч: 0.1% / 0.2% / 0.5%
+FRESH_HOLDS = (3, 6, 12, 24, 48)    # баров по 5 мин: 15м, 30м, 1ч, 2ч, 4ч
+BAR = 300_000
+
+
+def fresh_signals(prem, thr, quiet=12):
+    """Bars where |premium| just crossed thr after `quiet` bars (1h) calm below
+    thr/2 — 'фандинг только что стал аномальным'. Returns [(i, sign)]."""
+    out = []
+    for i in range(quiet, len(prem)):
+        p = prem[i][4]
+        if abs(p) >= thr and max(abs(x[4]) for x in prem[i - quiet:i]) < thr / 2:
+            out.append((i, 1 if p > 0 else -1))
+    return out
+
+
+def fresh_trades(prem, px, interval_ms, thr, hold):
+    """Enter on the open of the bar AFTER the signal bar closes (no look-ahead),
+    exit `hold` bars later but always before the next settlement (no funding
+    paid or received). One position at a time. Returns [(with_crowd_net, ts)]."""
+    opens = {ts: o for ts, o, *_ in px}
+    busy, res = 0, []
+    for i, sign in fresh_signals(prem, thr):
+        t_in = prem[i][0] + BAR
+        if t_in < busy or t_in not in opens:
+            continue
+        next_T = (t_in // interval_ms + 1) * interval_ms
+        t_out = min(t_in + hold * BAR, next_T - BAR)   # закрыться до выплаты
+        if t_out <= t_in or t_out not in opens:
+            continue
+        busy = t_out
+        e, x = opens[t_in], opens[t_out]
+        res.append((sign * (x - e) / e * 100, t_in))   # «с толпой», до издержек
+    return res
+
+
+def fresh(days=30, workers=4):
+    from concurrent.futures import ThreadPoolExecutor
+    tick = scalp.get_json(f"{scalp.BYBIT}/market/tickers?category=linear")["list"]
+    syms = [t["symbol"] for t in tick if t["symbol"].endswith("USDT") and float(t.get("turnover24h") or 0) >= 5e6]
+    inst = scalp.fetch_instruments() or {}
+    now = int(time.time() * 1000) // BAR * BAR
+    start = now - days * 86_400_000
+
+    def one(s):
+        try:
+            return s, klines(s, "5", start, now, kind="premium-index-price-kline"), klines(s, "5", start, now)
+        except Exception:
+            return s, None, None
+
+    with ThreadPoolExecutor(workers) as pool:
+        data = [d for d in pool.map(one, syms) if d[1] and d[2]]
+    print(f"\nмонет: {len(data)} из {len(syms)} · {days} дн. · 5-мин premium index + цена · "
+          f"вход на следующем баре после сигнала, выход ДО выплаты · издержки {COST}% вычтены")
+    for thr in FRESH_THR:
+        print(f"\n|premium| только что стал ≥ {thr*100:.1f}% (час до этого был спокоен):")
+        for hold in FRESH_HOLDS:
+            raw = []
+            for s, prem, px in data:
+                iv = inst.get(s, {}).get("funding_interval_min", 480) * 60_000
+                raw += fresh_trades(prem, px, iv, thr, hold)
+            if not raw:
+                continue
+            w = [r - COST for r, _ in raw]
+            a = [-r - COST for r, _ in raw]
+            print(f"  держим до {hold*5:>3} мин  С ТОЛПОЙ   {stats_line(w)}")
+            print(f"  {'':15}  ПРОТИВ     {stats_line(a)}")
+    # устойчивость лучшей клетки во времени
+    raw = []
+    for s, prem, px in data:
+        iv = inst.get(s, {}).get("funding_interval_min", 480) * 60_000
+        raw += fresh_trades(prem, px, iv, 0.002, 12)
+    if raw:
+        mid = sorted(t for _, t in raw)[len(raw) // 2]
+        for name, sel in (("первая половина", lambda t: t < mid), ("вторая половина", lambda t: t >= mid)):
+            sub = [r for r, t in raw if sel(t)]
+            print(f"\n  ≥0.2%, 1ч — {name}: С ТОЛПОЙ {stats_line([r - COST for r in sub])} · "
+                  f"ПРОТИВ {stats_line([-r - COST for r in sub])}")
+
+
 def selftest():
     assert abs(tstat([1, 1, 1, 1]) - 0) < 1e-9  # zero variance → 0, no div-by-zero
     assert tstat([1, 2, 3, 4]) > 2
@@ -377,6 +463,20 @@ def selftest():
     assert tick_moves(tr[:3], Ts, 0.002) is None  # no exit print → skipped
     # early entry at the last print ≤ T−5 (100), exit T+30 (101.8), pay 0.2% funding + costs
     assert abs(m["early"][30] - (1.8 - 0.2 - COST)) < 1e-9, m["early"]
+    # fresh anomaly: calm hour, premium jumps to +0.3% at bar 12 → long entry at bar 13 open
+    base = 8 * 3_600_000 * 100  # aligned to an 8h settlement
+    prem = [(base + i * BAR, 0, 0, 0, 0.0003 if i != 12 else 0.003) for i in range(40)]
+    assert fresh_signals(prem, 0.002) == [(12, 1)]
+    assert fresh_signals([(base + i * BAR, 0, 0, 0, 0.003) for i in range(40)], 0.002) == []  # not fresh
+    px = [(base + i * BAR, 100.0 + i, 0, 0, 0) for i in range(40)]
+    tr = fresh_trades(prem, px, 8 * 3_600_000, 0.002, 6)
+    assert tr == [((119.0 - 113.0) / 113.0 * 100, base + 13 * BAR)], tr   # 13 → 19
+    # exit is capped before the next settlement: settlement 1h away, hold 4h
+    near = 8 * 3_600_000 * 100 + 8 * 3_600_000 - 3_600_000 - 14 * BAR  # signal so entry lands 1h before T
+    prem2 = [(near + i * BAR, 0, 0, 0, 0.0003 if i != 12 else 0.003) for i in range(80)]
+    px2 = [(near + i * BAR, 100.0, 0, 0, 0) for i in range(80)]
+    (r, t_in), = fresh_trades(prem2, px2, 8 * 3_600_000, 0.002, 48)
+    assert t_in == near + 13 * BAR
     print("study selftest ok")
 
 
@@ -392,5 +492,7 @@ if __name__ == "__main__":
         settlement()
     elif cmd == "ticks":
         settlement_ticks()
+    elif cmd == "fresh":
+        fresh()
     else:
         sys.exit(__doc__)
