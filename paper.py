@@ -76,7 +76,8 @@ def build_paths(conn, horizon_h, interval="60", sleep_s=0.15):
         "WHERE signal IN ('oversold','overbought') AND price IS NOT NULL GROUP BY symbol").fetchall()
     paths = {}
     for sym, lo, hi in syms:
-        paths[sym] = _fetch_lowhigh(sym + "USDT", lo * 1000, (hi + horizon_h * 3600) * 1000, interval)
+        # −1ч: свеча, содержащая первый вход, начинается раньше самого входа
+        paths[sym] = _fetch_lowhigh(sym + "USDT", (lo - 3600) * 1000, (hi + horizon_h * 3600) * 1000, interval)
         _t.sleep(sleep_s)
     return paths
 
@@ -165,7 +166,7 @@ def compare_stops(conn, horizon_h=24, stops=(0.02, 0.03, 0.05), risk_pct=RISK_PC
     the outcome — the video's whole point that risk management, not the signal,
     drives survival. Pass `paths` (build_paths) for honest intrabar stops."""
     return [{"stop_pct": s, **{k: simulate(conn, horizon_h, s, risk_pct, paths, cost_pct)[k]
-                               for k in ("pnl_pct", "winrate", "stops", "trades", "fees")}}
+                               for k in ("pnl_pct", "winrate", "stops", "trades", "fees", "approx_trades")}}
             for s in stops]
 
 
@@ -312,7 +313,7 @@ if __name__ == "__main__":
             print("тяну реальные 1ч-свечи с Bybit для intrabar-стопов…")
             paths = build_paths(conn, args.horizon_hours)
             have = sum(1 for v in paths.values() if v)
-            print(f"путь есть у {have}/{len(paths)} монет (у остальных — грубый фолбэк на горизонте)\n")
+            print(f"путь есть у {have}/{len(paths)} монет (у остальных — грубый фолбэк на горизонте)")
         if args.compare:
             rows = compare_stops(conn, args.horizon_hours, risk_pct=args.risk / 100, paths=paths,
                                  cost_pct=args.cost / 100)
@@ -322,6 +323,8 @@ if __name__ == "__main__":
             print(f"{'стоп':>6}{'P&L':>10}{'винрейт':>10}{'по стопу':>10}{'сделок':>9}")
             for x in rows:
                 print(f"{x['stop_pct']*100:>5.0f}%{x['pnl_pct']:>9.2f}%{(x['winrate'] or 0):>9.1f}%{x['stops']:>10}{x['trades']:>9}")
+            if paths:
+                print(f"\nстоп по грубому фолбэку (нет свечей): {rows[0]['approx_trades']} из {rows[0]['trades']} сделок")
         else:
             r = simulate(conn, args.horizon_hours, args.stop / 100, args.risk / 100, paths, args.cost / 100)
             if args.json:
