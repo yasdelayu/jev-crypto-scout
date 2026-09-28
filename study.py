@@ -7,6 +7,7 @@
                                 # T−30m → T → T+5/30/60m, betting against the payers
     python3 study.py settlement # robustness of the post-settlement move: more history,
                                 # entry delay, exits, fees+slippage, splits, halves
+    python3 study.py ticks      # same on tick data (public.bybit.com): entry +0.25s…+30s
     python3 study.py --selftest
 
 Only public market data, no keys. Run from a network Bybit doesn't geo-block.
@@ -232,6 +233,104 @@ def settlement(min_abs=0.001, pages=3):
     print("  чаще всего в выборке: " + ", ".join(f"{s.replace('USDT','')} ×{n}" for n, s in conc))
 
 
+DELAYS = (0, 0.25, 0.5, 1, 2, 3, 5, 10, 30)  # сек после сброса
+
+
+def tick_moves(trades, T, rate, exit_s=300):
+    """trades: [(ts_s, price)] sorted. For each entry delay: net % of trading WITH
+    the payers from the first print at/after T+delay to the first print at/after
+    T+exit_s; plus the signed jump from the last pre-settlement print. None if
+    the window isn't covered."""
+    import bisect
+    ts = [t for t, _ in trades]
+    def at(x):
+        i = bisect.bisect_left(ts, x)
+        return trades[i][1] if i < len(trades) else None
+    i0 = bisect.bisect_left(ts, T) - 1
+    if i0 < 0:
+        return None
+    pre = trades[i0][1]
+    exit_p = at(T + exit_s)
+    if exit_p is None:
+        return None
+    d = 1 if rate > 0 else -1
+    out = {"jump": {}, "net": {}}
+    for dl in DELAYS:
+        e = at(T + dl)
+        if e is None:
+            return None
+        out["jump"][dl] = d * (e - pre) / pre * 100
+        out["net"][dl] = d * (exit_p - e) / e * 100 - COST
+    return out
+
+
+def load_ticks(sym, day, windows):
+    """Stream one day's trade CSV from public.bybit.com, keep only prints inside
+    the [lo, hi] windows (seconds) — the files are ~1M rows, most irrelevant."""
+    import csv, gzip, io, urllib.request
+    url = f"https://public.bybit.com/trading/{sym}/{sym}{day}.csv.gz"
+    raw = urllib.request.urlopen(url, timeout=60).read()
+    rows = []
+    for r in csv.reader(io.TextIOWrapper(gzip.GzipFile(fileobj=io.BytesIO(raw)), "utf-8")):
+        if r[0] == "timestamp":
+            continue
+        t = float(r[0])
+        if any(lo <= t <= hi for lo, hi in windows):
+            rows.append((t, float(r[4])))
+    return sorted(rows)
+
+
+def settlement_ticks(min_abs=0.001, pages=3, max_files=160, per_symbol=12):
+    import random
+    t0 = time.time()
+    scalp.get_json(f"{scalp.BYBIT}/market/time")
+    print(f"задержка сервер→Bybit (HTTP запрос целиком): {(time.time() - t0) * 1000:.0f} мс")
+    tick = scalp.get_json(f"{scalp.BYBIT}/market/tickers?category=linear")["list"]
+    syms = [t["symbol"] for t in tick if t["symbol"].endswith("USDT") and float(t.get("turnover24h") or 0) >= 5e6]
+    groups = {}
+    for s in syms:
+        try:
+            for T, r in funding_history(s, pages):
+                if abs(r) >= min_abs:
+                    day = time.strftime("%Y-%m-%d", time.gmtime(T / 1000))
+                    groups.setdefault((s, day), []).append((T / 1000, r))
+        except Exception:
+            pass
+    keys = list(groups)
+    random.seed(7)
+    random.shuffle(keys)
+    picked, per = [], {}
+    for k in keys:  # не больше per_symbol дней на монету — чтобы LSK не съел выборку
+        if per.get(k[0], 0) < per_symbol:
+            picked.append(k)
+            per[k[0]] = per.get(k[0], 0) + 1
+        if len(picked) >= max_files:
+            break
+    res = []
+    for sym, day in picked:
+        evs = groups[(sym, day)]
+        try:
+            trades = load_ticks(sym, day, [(T - 120, T + 330) for T, _ in evs])
+        except Exception:
+            continue
+        for T, r in evs:
+            m = tick_moves(trades, T, r)
+            if m:
+                res.append((sym, abs(r), m))
+    print(f"событий с тиками: {len(res)} ({len({s for s, _, _ in res})} монет, {len(picked)} дней-файлов) · "
+          f"издержки {COST}% вычтены\n")
+    print("СКАЧОК ОТ ПОСЛЕДНЕЙ ЦЕНЫ ДО СБРОСА (в сторону плательщиков) — как быстро он случается:")
+    for dl in DELAYS:
+        print(f"  к T+{dl:<5}с  {stats_line([m['jump'][dl] for _, _, m in res])}")
+    print("\nСДЕЛКА С ПЛАТЕЛЬЩИКАМИ: вход T+задержка, выход T+5мин, после издержек:")
+    for dl in DELAYS:
+        print(f"  вход T+{dl:<5}с {stats_line([m['net'][dl] for _, _, m in res])}")
+    for label, lo, hi in (("|ставка| 0.1–0.2%", 0, 0.002), ("|ставка| 0.2–0.5%", 0.002, 0.005), ("|ставка| ≥0.5%", 0.005, 9)):
+        sub = [m for _, a, m in res if lo <= a < hi]
+        if sub:
+            print(f"  {label:<18} вход T+1с: {stats_line([m['net'][1] for m in sub])}")
+
+
 def selftest():
     assert abs(tstat([1, 1, 1, 1]) - 0) < 1e-9  # zero variance → 0, no div-by-zero
     assert tstat([1, 2, 3, 4]) > 2
@@ -249,6 +348,15 @@ def selftest():
     assert abs(net - ((102.5 - 100.5) / 100.5 * 100 - COST)) < 1e-9 and abs(worst - (99 - 100.5) / 100.5 * 100) < 1e-9
     net_s, _ = with_payers(k2, T, -0.003, 1, 4)    # shorts paid → short into the same rise loses
     assert net_s < 0
+    # ticks: longs paid; last pre price 100, jump to 101 at T+0.1s, 101.5 by T+1s, exit 102 at T+300s
+    Ts = 1_000_000.0
+    tr = [(Ts - 5, 100.0), (Ts + 0.1, 101.0), (Ts + 1.0, 101.5), (Ts + 4, 101.5), (Ts + 11, 101.6),
+          (Ts + 31, 101.8), (Ts + 300, 102.0)]
+    m = tick_moves(tr, Ts, +0.002)
+    assert abs(m["jump"][0] - 1.0) < 1e-9 and abs(m["jump"][1] - 1.5) < 1e-9
+    assert abs(m["net"][0] - ((102 - 101) / 101 * 100 - COST)) < 1e-9
+    assert m["net"][0] > m["net"][30]  # later entry = less left
+    assert tick_moves(tr[:3], Ts, 0.002) is None  # no exit print → skipped
     print("study selftest ok")
 
 
@@ -262,5 +370,7 @@ if __name__ == "__main__":
         funding()
     elif cmd == "settlement":
         settlement()
+    elif cmd == "ticks":
+        settlement_ticks()
     else:
         sys.exit(__doc__)
