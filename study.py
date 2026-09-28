@@ -234,6 +234,7 @@ def settlement(min_abs=0.001, pages=3):
 
 
 DELAYS = (0, 0.25, 0.5, 1, 2, 3, 5, 10, 30)  # сек после сброса
+EARLY_EXITS = (1, 5, 10, 30, 60, 300)          # выход после сброса, сек (для входа заранее)
 
 
 def tick_moves(trades, T, rate, exit_s=300):
@@ -254,7 +255,16 @@ def tick_moves(trades, T, rate, exit_s=300):
     if exit_p is None:
         return None
     d = 1 if rate > 0 else -1
-    out = {"jump": {}, "net": {}}
+    out = {"jump": {}, "net": {}, "early": {}}
+    # заранее: вход по последней цене за 5 с до сброса, платим |ставку|, выходим на T+x
+    j5 = bisect.bisect_right(ts, T - 5) - 1
+    if j5 >= 0:
+        e5 = trades[j5][1]
+        for x in EARLY_EXITS:
+            p = at(T + x)
+            if p is None:
+                return None
+            out["early"][x] = d * (p - e5) / e5 * 100 - abs(rate) * 100 - COST
     for dl in DELAYS:
         e = at(T + dl)
         if e is None:
@@ -329,6 +339,14 @@ def settlement_ticks(min_abs=0.001, pages=3, max_files=160, per_symbol=12):
         sub = [m for _, a, m in res if lo <= a < hi]
         if sub:
             print(f"  {label:<18} вход T+1с: {stats_line([m['net'][1] for m in sub])}")
+    early = [(a, m) for _, a, m in res if m["early"]]
+    print("\nЗАРАНЕЕ: вход за 5 с ДО сброса на сторону плательщиков, платим фандинг, выход T+x, после издержек:")
+    for x in EARLY_EXITS:
+        print(f"  выход T+{x:<4}с {stats_line([m['early'][x] for _, m in early])}")
+    for label, lo, hi in (("|ставка| 0.1–0.2%", 0, 0.002), ("|ставка| 0.2–0.5%", 0.002, 0.005), ("|ставка| ≥0.5%", 0.005, 9)):
+        sub = [m for a, m in early if lo <= a < hi]
+        if sub:
+            print(f"  {label:<18} выход T+30с: {stats_line([m['early'][30] for m in sub])}")
 
 
 def selftest():
@@ -357,6 +375,8 @@ def selftest():
     assert abs(m["net"][0] - ((102 - 101) / 101 * 100 - COST)) < 1e-9
     assert m["net"][0] > m["net"][30]  # later entry = less left
     assert tick_moves(tr[:3], Ts, 0.002) is None  # no exit print → skipped
+    # early entry at the last print ≤ T−5 (100), exit T+30 (101.8), pay 0.2% funding + costs
+    assert abs(m["early"][30] - (1.8 - 0.2 - COST)) < 1e-9, m["early"]
     print("study selftest ok")
 
 
