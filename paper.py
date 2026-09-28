@@ -215,12 +215,13 @@ def simulate(conn, horizon_h=24, stop_pct=STOP_PCT, risk_pct=RISK_PCT, paths=Non
     }
 
 
-def compare_stops(conn, horizon_h=24, stops=(0.02, 0.03, 0.05), risk_pct=RISK_PCT, paths=None, cost_pct=COST_PCT):
+def compare_stops(conn, horizon_h=24, stops=(0.02, 0.03, 0.05), risk_pct=RISK_PCT, paths=None, cost_pct=COST_PCT, rule="rsi"):
     """Same trades, different stop-loss %. Shows how much the stop alone moves
     the outcome — the video's whole point that risk management, not the signal,
     drives survival. Pass `paths` (build_paths) for honest intrabar stops."""
-    return [{"stop_pct": s, **{k: simulate(conn, horizon_h, s, risk_pct, paths, cost_pct)[k]
-                               for k in ("pnl_pct", "winrate", "stops", "trades", "fees", "approx_trades")}}
+    return [{"stop_pct": s, **{k: simulate(conn, horizon_h, s, risk_pct, paths, cost_pct, rule)[k]
+                               for k in ("pnl_pct", "winrate", "stops", "trades", "fees", "approx_trades",
+                                         "t_stat", "max_dd")}}
             for s in stops]
 
 
