@@ -73,6 +73,16 @@ journalctl -u jev-bot.service -f        # watch it
 Bot commands (owner only): `/help` `/legend` `/settings` `/run` `/top N`
 `/lang ru|en` `/on <block>` `/off <block>` (blocks: `scalp fng listings ta news`).
 
+## Public channel (optional)
+
+One post a day from the 04:00 UTC run: today's rule flags + the verdict on
+yesterday's flags (losses included), sent as a reply to yesterday's post so
+every call is chained to its outcome. See `channel.py`.
+
+1. Create a Telegram channel, add the bot as an admin (post messages).
+2. `echo 'CHANNEL_ID=@your_channel' >> .env` and `systemctl restart jev-bot.service`.
+3. In the bot: 📡 Канал → 👁 Превью to see the post in your DM first.
+
 ## Updating
 
 ```bash

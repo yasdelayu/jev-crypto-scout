@@ -12,4 +12,11 @@ fi
 
 # botconfig.to_argv turns stored settings into CLI flags; add --log --telegram.
 ARGS=$(python3 -c "import botconfig; print(' '.join(botconfig.to_argv(botconfig.load())))")
-exec python3 scout.py $ARGS --log --telegram
+
+# Публичный канал: один пост в день, утренним прогоном (04 UTC = 07 МСК).
+# Нужен CHANNEL_ID в .env и бот-админ канала. Повтор в тот же день channel.py отклонит.
+EXTRA=""
+if [ -n "${CHANNEL_ID:-}" ] && [ "$(date -u +%H)" = "04" ]; then
+  EXTRA="--channel"
+fi
+exec python3 scout.py $ARGS --log --telegram $EXTRA

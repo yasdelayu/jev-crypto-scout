@@ -401,6 +401,10 @@ if __name__ == "__main__":
                     help="дописать этот прогон в history.db (SQLite) — фундамент для validate.py")
     p.add_argument("--telegram", action="store_true",
                     help="отправить краткий дайджест в Telegram (нужны TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID)")
+    p.add_argument("--channel", action="store_true",
+                    help="пост дня в публичный канал CHANNEL_ID (флаги + вердикт по вчерашним, см. channel.py)")
+    p.add_argument("--channel-preview", action="store_true",
+                    help="тот же пост владельцу в личку, ничего не записывая")
     p.add_argument("--selftest", action="store_true")
     args = p.parse_args()
 
@@ -527,3 +531,12 @@ if __name__ == "__main__":
             print("дайджест отправлен в Telegram")
         except Exception as e:
             print(f"не удалось отправить в Telegram: {e}", file=sys.stderr)
+
+    if args.channel or args.channel_preview:
+        import channel
+        try:
+            channel.post(ranked, scalp_results, context, priorities, preview=args.channel_preview)
+            print("пост канала " + ("(превью) " if args.channel_preview else "") + "отправлен")
+        except Exception as e:
+            print(f"пост канала не отправлен: {e}", file=sys.stderr)
+            sys.exit(3)

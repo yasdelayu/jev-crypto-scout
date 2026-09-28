@@ -6,25 +6,38 @@ Reads TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID from the environment. Used by
 scout.py --telegram; on a server this is what a timer calls so the table
 reaches your phone instead of a log nobody reads.
 """
-import html, json, os, urllib.parse, urllib.request
+import html, json, os, urllib.error, urllib.parse, urllib.request
 
 TG_LIMIT = 4096  # Telegram's hard per-message character cap
 
 
-def _post(text):
+def call(method, _timeout=20, **params):
+    """Raw Bot API call. dict/list params (reply_markup, reply_parameters) go
+    as JSON strings — that's what the API expects in a form-encoded body."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-    if not token or not chat_id:
-        raise RuntimeError("нет TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID в окружении")
-    data = urllib.parse.urlencode({
-        "chat_id": chat_id, "text": text,
-        "parse_mode": "HTML", "disable_web_page_preview": "true"}).encode()
-    req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=data)
-    with urllib.request.urlopen(req, timeout=20) as r:
-        out = json.load(r)
+    if not token:
+        raise RuntimeError("нет TELEGRAM_BOT_TOKEN в окружении")
+    data = urllib.parse.urlencode({k: json.dumps(v) if isinstance(v, (dict, list)) else v
+                                   for k, v in params.items() if v is not None}).encode()
+    req = urllib.request.Request(f"https://api.telegram.org/bot{token}/{method}", data=data)
+    try:
+        with urllib.request.urlopen(req, timeout=_timeout) as r:
+            out = json.load(r)
+    except urllib.error.HTTPError as e:
+        out = json.loads(e.read() or b"{}")
     if not out.get("ok"):
-        raise RuntimeError(f"Telegram API: {out}")
-    return out
+        raise RuntimeError(f"Telegram API {method}: {out.get('description', out)}")
+    return out["result"]
+
+
+def _post(text, chat_id=None, **extra):
+    """sendMessage → the sent Message (has message_id). chat_id defaults to the
+    owner chat; extra = reply_markup / reply_parameters / etc."""
+    chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID")
+    if not chat_id:
+        raise RuntimeError("нет TELEGRAM_CHAT_ID в окружении")
+    return call("sendMessage", chat_id=chat_id, text=text, parse_mode="HTML",
+                disable_web_page_preview="true", **extra)
 
 
 def _send(text):
