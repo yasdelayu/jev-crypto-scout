@@ -5,3 +5,6 @@ run_*.json
 .impeccable/
 history.db
 config.json
+
+# private strategy/monetization notes
+STRATEGY*.md
