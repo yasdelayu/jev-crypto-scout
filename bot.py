@@ -45,6 +45,7 @@ HELP = """<b>🤖 Jev Crypto Scout</b>
 📊 <b>Полный прогон</b> — по настройкам, ~3–5 мин
 💼 <b>Демо-счёт</b> — вырос бы виртуальный $10 000 по правилу (стопы по реальным свечам, с комиссиями)
 ⚖️ <b>Стопы</b> — какой стоп лучше: 2/3/5% на тех же сделках, горизонт 24ч/48ч/7д
+🧪 /rules — все правила входа на одном движке (RSI, 🎯 фандинг+перегиб, против толпы) со значимостью
 📈 <b>Самопроверка</b> — есть ли у сигналов эдж против случайной монеты (со значимостью)
 ⚙️ <b>Настройки</b> — сколько монет, язык, какие блоки (кнопками)
 📡 <b>Канал</b> — публичный канал: превью, публикация, счёт
@@ -198,7 +199,8 @@ def compare_screen(h, msg_id=None):
         conn = paper.history.connect()
         rows = paper.compare_stops(conn, h, paths=paths())
         conn.close()
-        edit(msg_id, paper.compare_text(rows, h, True), ikb(horizon_row("cmp", h), [btn("💼 Демо-счёт", "paper:24")]))
+        edit(msg_id, paper.compare_text(rows, h, True), ikb(horizon_row("cmp", h),
+                                                              [btn("💼 Демо-счёт", "paper:24"), btn("🧪 Правила", f"rules:{h}")]))
     except Exception as e:
         edit(msg_id, f"⚠️ Не удалось посчитать: {html.escape(str(e))}", ikb(horizon_row("cmp", h)))
 
@@ -213,9 +215,24 @@ def paper_screen(h, msg_id=None):
         conn = paper.history.connect()
         r = paper.simulate(conn, h, paths=paths())
         conn.close()
-        edit(msg_id, paper.summary_text(r), ikb(horizon_row("paper", h), [btn("⚖️ Сравнить стопы", f"cmp:{h}")]))
+        edit(msg_id, paper.summary_text(r), ikb(horizon_row("paper", h), [btn("⚖️ Стопы", f"cmp:{h}"), btn("🧪 Правила", f"rules:{h}")]))
     except Exception as e:
         edit(msg_id, f"⚠️ Не удалось посчитать демо-счёт: {html.escape(str(e))}", ikb(horizon_row("paper", h)))
+
+
+def rules_screen(h, msg_id=None):
+    import paper
+    if msg_id is None:
+        msg_id = send("⏳ Гоняю все правила на бумаге…", ikb())["message_id"]
+    else:
+        edit(msg_id, "⏳ Гоняю все правила на бумаге…")
+    try:
+        conn = paper.history.connect()
+        rows = paper.compare_rules(conn, h, paths=paths())
+        conn.close()
+        edit(msg_id, paper.rules_text(rows, h), ikb(horizon_row("rules", h), [btn("⚖️ Стопы", f"cmp:{h}")]))
+    except Exception as e:
+        edit(msg_id, f"⚠️ Не удалось посчитать: {html.escape(str(e))}", ikb(horizon_row("rules", h)))
 
 
 def channel_view():
@@ -273,6 +290,8 @@ def handle(text):
         send(stats_text())
     elif cmd == "paper":
         bg(paper_screen, int(arg) if arg.isdigit() else 24)
+    elif cmd == "rules":
+        bg(rules_screen, int(arg) if arg.isdigit() else 24)
     elif cmd == "compare":
         bg(compare_screen, int(arg) if arg.isdigit() else 24)
     elif cmd == "settings":
@@ -323,6 +342,8 @@ def on_callback(q):
         bg(compare_screen, int(val), msg_id)
     elif kind == "paper" and val.isdigit():
         bg(paper_screen, int(val), msg_id)
+    elif kind == "rules" and val.isdigit():
+        bg(rules_screen, int(val), msg_id)
     elif data == "ch:preview":
         toast = "Готовлю превью — придёт сюда через ~4 мин"
         bg(run_scout, extra=["--channel-preview"], telegram=False, log=False)
@@ -340,6 +361,7 @@ def main():
         {"command": "quick", "description": "быстрая сводка"},
         {"command": "paper", "description": "демо-счёт"},
         {"command": "compare", "description": "сравнить стопы"},
+        {"command": "rules", "description": "сравнить правила входа"},
         {"command": "legend", "description": "что значат значки"}])
     send("🤖 Бот перезапущен. Меню внизу 👇", KEYBOARD)
     offset = None

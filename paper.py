@@ -66,14 +66,46 @@ def _fetch_lowhigh(perp, start_ms, end_ms, interval="60"):
     return sorted(set(out)) or None
 
 
-def build_paths(conn, horizon_h, interval="60", sleep_s=0.15):
-    """One Bybit kline fetch per distinct flagged coin, covering its whole
-    signal span — so simulate() can check stops intrabar without a call per
-    trade. Spaced out (sleep_s) so a burst doesn't trip Bybit's CloudFront WAF."""
+# Правила входа: SQL → (symbol, ts, entry_price, direction +1 long / −1 short).
+# Все считаются одним движком simulate() — меняется только «когда входим».
+# Фандинговые правила джойнят scalp_runs (символ 'ENAUSDT', тот же прогон ±10 мин)
+# с ценой из scout_runs.
+_JOIN = ("FROM scalp_runs f JOIN scout_runs s ON s.symbol || 'USDT' = f.symbol "
+         "AND ABS(f.ts - s.ts) < 600 AND s.price IS NOT NULL ")
+RULES = {
+    "rsi": ("RSI-перегиб: перепродан→лонг, перекуплен→шорт",
+            "SELECT symbol, ts, price, CASE signal WHEN 'oversold' THEN 1 ELSE -1 END FROM scout_runs "
+            "WHERE signal IN ('oversold','overbought') AND price IS NOT NULL"),
+    "target": ("🎯 фандинг-перекос + минутный RSI-перегиб в ту же сторону",
+               "SELECT s.symbol, s.ts, s.price, CASE WHEN f.funding_z < 0 THEN 1 ELSE -1 END " + _JOIN +
+               "WHERE f.candidate = 1"),
+    "rsi_funding": ("дневной RSI-перегиб + фандинг-перекос (|z|≥1.5) в ту же сторону",
+                    "SELECT s.symbol, s.ts, s.price, CASE s.signal WHEN 'oversold' THEN 1 ELSE -1 END " + _JOIN +
+                    "WHERE (s.signal = 'oversold' AND f.funding_z <= -1.5) "
+                    "OR (s.signal = 'overbought' AND f.funding_z >= 1.5)"),
+    "funding": ("против толпы: |z фандинга|≥2 → против тех, кто переплачивает",
+                "SELECT s.symbol, s.ts, s.price, CASE WHEN f.funding_z < 0 THEN 1 ELSE -1 END " + _JOIN +
+                "WHERE ABS(f.funding_z) >= 2"),
+}
+# ponytail: фандинг, который правило «против толпы» САМО получало бы, не начислен —
+# для фандинговых правил результат консервативный.
+
+
+def entries(conn, rule="rsi"):
+    return conn.execute(RULES[rule][1] + " ORDER BY 2").fetchall()
+
+
+def build_paths(conn, horizon_h, interval="60", sleep_s=0.15, rules=tuple(RULES)):
+    """One Bybit kline fetch per distinct coin any of `rules` enters, covering
+    its whole signal span — so simulate() can check stops intrabar without a call
+    per trade. Spaced out (sleep_s) so a burst doesn't trip Bybit's CloudFront WAF."""
     import time as _t
-    syms = conn.execute(
-        "SELECT symbol, MIN(ts), MAX(ts) FROM scout_runs "
-        "WHERE signal IN ('oversold','overbought') AND price IS NOT NULL GROUP BY symbol").fetchall()
+    span = {}
+    for rule in rules:
+        for sym, ts, _, _ in entries(conn, rule):
+            lo, hi = span.get(sym, (ts, ts))
+            span[sym] = (min(lo, ts), max(hi, ts))
+    syms = [(s, lo, hi) for s, (lo, hi) in span.items()]
     paths = {}
     for sym, lo, hi in syms:
         # −1ч: свеча, содержащая первый вход, начинается раньше самого входа
@@ -99,8 +131,8 @@ def _stopped_intrabar(path, entry_ts, exit_ts, entry, direction, stop_pct):
     return any(h >= ceil for h, _ in window)
 
 
-def simulate(conn, horizon_h=24, stop_pct=STOP_PCT, risk_pct=RISK_PCT, paths=None, cost_pct=COST_PCT):
-    """Replay the mean-reversion rule with PROPER risk management: each trade
+def simulate(conn, horizon_h=24, stop_pct=STOP_PCT, risk_pct=RISK_PCT, paths=None, cost_pct=COST_PCT, rule="rsi"):
+    """Replay an entry rule (RULES) with PROPER risk management: each trade
     risks a fixed risk_pct of capital, capped by a stop_pct stop-loss. Position
     size follows from that, not the other way round. A trade closes at the stop
     (loss = risk_pct) if the stop was hit, otherwise at the horizon price.
@@ -112,21 +144,27 @@ def simulate(conn, horizon_h=24, stop_pct=STOP_PCT, risk_pct=RISK_PCT, paths=Non
     entry and exit — the honest version. `intrabar` in the result says which ran.
 
     cost_pct: round-trip fees+slippage as a fraction of the position's notional
-    (notional = risk$ / stop), charged on every trade, win or lose."""
-    rows = conn.execute(
-        "SELECT symbol, ts, price, signal FROM scout_runs "
-        "WHERE signal IN ('oversold','overbought') AND price IS NOT NULL ORDER BY ts ASC").fetchall()
-    balance = START_BALANCE
+    (notional = risk$ / stop), charged on every trade, win or lose.
+
+    Realism stats for "would we really have made money":
+      max_dd        — worst peak-to-trough fall of the balance, %
+      max_exposure  — peak total notional of simultaneously open positions as a
+                      multiple of balance (>1 means you'd need that much leverage)
+      t_stat        — mean per-trade R / its standard error; |t| < 2 = noise."""
+    import statistics
+    balance = peak = START_BALANCE
+    max_dd = max_exposure = 0.0
     trades, wins, approx, fees = [], 0, 0, 0.0
+    open_pos = []    # (exit_ts, notional) — для пикового плеча
     busy_until = {}  # одна позиция на монету: флаг держится несколько прогонов подряд — это ОДИН перегиб, не 6 сделок
-    for symbol, ts, entry, signal in rows:
+    for symbol, ts, entry, direction in entries(conn, rule):
         if ts < busy_until.get(symbol, 0):
             continue
         exit_ts, exit_price = _price_after(conn, symbol, ts, horizon_h * 3600)
         if not exit_price:
             continue  # позиция ещё «открыта» — нет цены выхода в истории
         busy_until[symbol] = exit_ts
-        direction = 1 if signal == "oversold" else -1  # long / short
+        signal = "oversold" if direction > 0 else "overbought"
         raw_ret = direction * (exit_price - entry) / entry
         # стоп: intrabar по реальным свечам, если есть путь; иначе — на горизонте
         hit = _stopped_intrabar(paths.get(symbol) if paths else None,
@@ -142,16 +180,28 @@ def simulate(conn, horizon_h=24, stop_pct=STOP_PCT, risk_pct=RISK_PCT, paths=Non
         else:
             pnl = risk_dollars * (raw_ret / stop_pct)  # прибыль/убыток в единицах риска (R)
             realized_ret = raw_ret
-        cost = risk_dollars / stop_pct * cost_pct      # комиссии+слиппедж от номинала
+        notional = risk_dollars / stop_pct
+        open_pos = [p for p in open_pos if p[0] > ts] + [(exit_ts, notional)]
+        max_exposure = max(max_exposure, sum(p[1] for p in open_pos) / balance)
+        cost = notional * cost_pct                     # комиссии+слиппедж от номинала
         pnl -= cost
         fees += cost
+        r_mult = pnl / risk_dollars                    # итог сделки в R (после издержек)
         balance += pnl
+        peak = max(peak, balance)
+        max_dd = max(max_dd, (peak - balance) / peak)
         wins += pnl > 0                                # победа — только если в плюсе ПОСЛЕ издержек
         trades.append({"symbol": symbol, "signal": signal, "dir": "long" if direction > 0 else "short",
                        "entry": entry, "exit": exit_price, "ret_pct": (realized_ret - cost_pct) * 100,
-                       "pnl": pnl, "stopped": hit})
+                       "pnl": pnl, "r": r_mult, "stopped": hit})
     n = len(trades)
+    rs = [t["r"] for t in trades]
+    t_stat = (statistics.mean(rs) / (statistics.stdev(rs) / n ** 0.5)
+              if n >= 3 and statistics.stdev(rs) > 0 else None)
     return {
+        "rule": rule, "avg_r": round(statistics.mean(rs), 3) if rs else None,
+        "t_stat": round(t_stat, 2) if t_stat is not None else None,
+        "max_dd": round(max_dd * 100, 1), "max_exposure": round(max_exposure, 2),
         "horizon_h": horizon_h, "trades": n,
         "start": START_BALANCE, "balance": round(balance, 2),
         "pnl": round(balance - START_BALANCE, 2),
@@ -172,6 +222,44 @@ def compare_stops(conn, horizon_h=24, stops=(0.02, 0.03, 0.05), risk_pct=RISK_PC
     return [{"stop_pct": s, **{k: simulate(conn, horizon_h, s, risk_pct, paths, cost_pct)[k]
                                for k in ("pnl_pct", "winrate", "stops", "trades", "fees", "approx_trades")}}
             for s in stops]
+
+
+def compare_rules(conn, horizon_h=24, stop_pct=STOP_PCT, paths=None, cost_pct=COST_PCT):
+    keys = ("rule", "trades", "pnl_pct", "winrate", "avg_r", "t_stat", "max_dd", "max_exposure", "approx_trades")
+    return [{k: simulate(conn, horizon_h, stop_pct, RISK_PCT, paths, cost_pct, rule)[k] for k in keys}
+            for rule in RULES]
+
+
+def verdict(x):
+    """Plain-language call on one rule's result — the stats, not the P&L, decide."""
+    if x["trades"] < 30:
+        return "мало сделок — пока ничего не значит"
+    if x["t_stat"] is not None and x["t_stat"] >= 2:
+        return "похоже на эдж (t≥2) — копим дальше, не спешим"
+    if x["t_stat"] is not None and x["t_stat"] <= -2:
+        return "устойчиво убыточно"
+    return "шум: от случайности не отличить"
+
+
+def rules_text(rows, horizon_h):
+    lines = [f"🧪 <b>Правила на бумаге · {horizon_h}ч · стоп 3%</b>"]
+    for x in rows:
+        if not x["trades"]:
+            lines.append(f"\n<b>{html_escape(RULES[x['rule']][0])}</b>\nпока 0 сделок")
+            continue
+        t = f"{x['t_stat']:+.1f}" if x["t_stat"] is not None else "—"
+        lines.append(f"\n<b>{html_escape(RULES[x['rule']][0])}</b>\n"
+                     f"<code>{x['trades']:>3} сд · {x['pnl_pct']:+6.1f}% · вин {x['winrate'] or 0:.0f}% · "
+                     f"{x['avg_r']:+.2f}R · t={t} · просадка {x['max_dd']:.0f}% · плечо×{x['max_exposure']:.1f}</code>\n"
+                     f"→ {verdict(x)}")
+    lines.append("\n<i>R — итог сделки в единицах риска (1R = 1% счёта). t — значимость: |t|&lt;2 = шум. "
+                 "Плечо — сколько номинала было открыто разом относительно счёта. Стопы по реальным свечам, с комиссиями.</i>")
+    return "\n".join(lines)
+
+
+def html_escape(s):
+    import html
+    return html.escape(s, quote=False)
 
 
 def compare_text(rows, horizon_h, intrabar, cost_pct=COST_PCT):
@@ -210,7 +298,7 @@ def report(r):
 
 
 def summary_text(r):
-    lines = [f"<b>🎮 Демо-счёт (правило mean-reversion, {r['horizon_h']}ч)</b>"]
+    lines = [f"<b>🎮 Демо-счёт · {html_escape(RULES[r['rule']][0])} · {r['horizon_h']}ч</b>"]
     if r["trades"] == 0:
         lines.append("Пока нет закрытых виртуальных сделок — копим историю, загляни позже.")
         return "\n".join(lines)
@@ -219,6 +307,10 @@ def summary_text(r):
                  f"({r['pnl_pct']:+.2f}%)")
     lines.append(f"сделок: {r['trades']} · винрейт: {r['winrate']}% · по стопу: {r['stops']}")
     lines.append(f"комиссии+слиппедж съели: <b>${r['fees']:,.0f}</b>")
+    lines.append(f"худшая просадка: <b>−{r['max_dd']:.0f}%</b> · пик позиций разом: <b>×{r['max_exposure']:.1f}</b> от счёта"
+                 + (" (нужно плечо)" if r["max_exposure"] > 1 else ""))
+    t = f"{r['t_stat']:+.1f}" if r["t_stat"] is not None else "—"
+    lines.append(f"в среднем {r['avg_r']:+.2f}R на сделку · значимость t={t} → <b>{verdict(r)}</b>")
     mode = "стопы по реальным 1ч-свечам" if r.get("intrabar") else "⚠️ стоп только на горизонте"
     lines.append(f"<i>риск {r['risk_pct']:.0%}/сделку, стоп {r['stop_pct']:.0%}, {mode}, "
                  f"издержки {r['cost_pct']*100:.2f}% за круг</i>")
@@ -299,6 +391,22 @@ def selftest():
     late = {"Z": [(int((now + 5*3600) * 1000), 109.0, 100.0)]}
     assert simulate(conn3, 24, paths=late)["approx_trades"] == 1
     assert "Стопы" in compare_text(compare_stops(conn3, 24, paths=path), 24, True)
+    # funding rules: a crowded-shorts run (z<0) with oversold daily RSI → long; join by symbol+USDT, same run
+    connf = history.connect(":memory:")
+    connf.execute("INSERT INTO scout_runs (ts,symbol,price,signal) VALUES (?,?,?,?)", (now, "F", 100.0, "oversold"))
+    connf.execute("INSERT INTO scalp_runs (ts,symbol,funding_z,rsi_1m,stoch_1m,candidate) VALUES (?,?,?,?,?,?)",
+                  (now + 1, "FUSDT", -3.0, 25, 10, 1))
+    connf.execute("INSERT INTO scout_runs (ts,symbol,price,signal) VALUES (?,?,?,?)", (now + 25*3600, "F", 104.0, None))
+    connf.commit()
+    for rule in ("target", "rsi_funding", "funding"):
+        rf = simulate(connf, 24, rule=rule, cost_pct=0)
+        assert rf["trades"] == 1 and rf["closed"][0]["dir"] == "long" and rf["pnl"] > 0, (rule, rf)
+    x = compare_rules(connf, 24)
+    assert [r["rule"] for r in x] == list(RULES) and verdict(x[0]) == "мало сделок — пока ничего не значит"
+    assert "Правила на бумаге" in rules_text(x, 24)
+    # realism stats: 3 losers → drawdown > 0, exposure = notional/balance of one position ≈ 0.33
+    rl = simulate(conn2, 24)
+    assert rl["max_dd"] > 0 and 0.3 < rl["max_exposure"] < 0.4, rl
     print("paper selftest ok")
 
 
@@ -308,6 +416,8 @@ if __name__ == "__main__":
     p.add_argument("--stop", type=float, default=STOP_PCT * 100, help="стоп-лосс в %% (напр. 2, 3, 5)")
     p.add_argument("--risk", type=float, default=RISK_PCT * 100, help="риск на сделку в %% капитала")
     p.add_argument("--compare", action="store_true", help="сравнить стопы 2/3/5%% на тех же сделках")
+    p.add_argument("--rules", action="store_true", help="сравнить все правила входа (RULES) на одном движке")
+    p.add_argument("--rule", choices=list(RULES), default="rsi", help="правило для демо-счёта")
     p.add_argument("--intrabar", action="store_true",
                     help="проверять стоп по реальным 1ч-свечам Bybit (честно, но медленнее)")
     p.add_argument("--cost", type=float, default=COST_PCT * 100,
@@ -325,7 +435,12 @@ if __name__ == "__main__":
             paths = build_paths(conn, args.horizon_hours)
             have = sum(1 for v in paths.values() if v)
             print(f"путь есть у {have}/{len(paths)} монет (у остальных — грубый фолбэк на горизонте)")
-        if args.compare:
+        if args.rules:
+            import re
+            txt = rules_text(compare_rules(conn, args.horizon_hours, args.stop / 100, paths, args.cost / 100),
+                             args.horizon_hours)
+            print(re.sub(r"<[^>]+>", "", txt).replace("&lt;", "<"))
+        elif args.compare:
             rows = compare_stops(conn, args.horizon_hours, risk_pct=args.risk / 100, paths=paths,
                                  cost_pct=args.cost / 100)
             mode = "intrabar по 1ч-свечам" if paths else "стоп на горизонте (оптимистично)"
@@ -337,7 +452,7 @@ if __name__ == "__main__":
             if paths:
                 print(f"\nстоп по грубому фолбэку (нет свечей): {rows[0]['approx_trades']} из {rows[0]['trades']} сделок")
         else:
-            r = simulate(conn, args.horizon_hours, args.stop / 100, args.risk / 100, paths, args.cost / 100)
+            r = simulate(conn, args.horizon_hours, args.stop / 100, args.risk / 100, paths, args.cost / 100, args.rule)
             if args.json:
                 import json
                 print(json.dumps(r, ensure_ascii=False))
