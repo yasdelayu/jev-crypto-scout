@@ -5,6 +5,8 @@
                                 # whether the US session reverses Asia
     python3 study.py funding    # price around extreme funding settlements:
                                 # T−30m → T → T+5/30/60m, betting against the payers
+    python3 study.py settlement # robustness of the post-settlement move: more history,
+                                # entry delay, exits, fees+slippage, splits, halves
     python3 study.py --selftest
 
 Only public market data, no keys. Run from a network Bybit doesn't geo-block.
@@ -146,6 +148,90 @@ def funding(min_abs=0.002):
             print(f"  {name:<52} {stats_line([m[key] for m in sub])}")
 
 
+def funding_history(sym, pages=3):
+    """Up to pages×200 past settlements, newest-first pages walked backwards."""
+    out, end = [], None
+    for _ in range(pages):
+        url = f"{scalp.BYBIT}/market/funding/history?category=linear&symbol={sym}&limit=200"
+        rows = scalp.get_json(url + (f"&endTime={end}" if end else ""))["list"]
+        out += [(int(x["fundingRateTimestamp"]), float(x["fundingRate"])) for x in rows]
+        if len(rows) < 200:
+            break
+        end = int(rows[-1]["fundingRateTimestamp"]) - 1
+        time.sleep(0.05)
+    return out
+
+
+COST = 0.21  # % за сделку: taker 0.055%×2 + проскальзывание 0.05%×2
+
+
+def with_payers(k, T, rate, delay, hold):
+    """Trade WITH the side that paid, entered `delay` min after settlement T,
+    closed `hold` min later. Returns (net %, worst adverse move %) or None."""
+    by = {ts: (o, h, l, c) for ts, o, h, l, c in k}
+    t0, t1 = T + delay * 60_000, T + (delay + hold) * 60_000
+    if t0 not in by or t1 not in by:
+        return None
+    d = 1 if rate > 0 else -1  # longs paid → go long
+    e, x = by[t0][0], by[t1][0]
+    bars = [by[t] for t in range(t0, t1, 60_000) if t in by]
+    worst = min((l - e) / e for _, _, l, _ in bars) if d > 0 else min((e - h) / e for _, h, _, _ in bars)
+    return d * (x - e) / e * 100 - COST, worst * 100
+
+
+def settlement(min_abs=0.001, pages=3):
+    tick = scalp.get_json(f"{scalp.BYBIT}/market/tickers?category=linear")["list"]
+    syms = [t["symbol"] for t in tick if t["symbol"].endswith("USDT") and float(t.get("turnover24h") or 0) >= 5e6]
+    ev = []
+    for s in syms:
+        try:
+            ev += [(s, T, r) for T, r in funding_history(s, pages) if abs(r) >= min_abs]
+        except Exception:
+            pass
+    ev.sort(key=lambda x: x[1])
+    print(f"\nперпов ≥$5M: {len(syms)}; сбросов с |ставкой| ≥ {min_abs*100:.1f}%: {len(ev)} "
+          f"(с {time.strftime('%d.%m.%y', time.gmtime(ev[0][1]/1000))} по {time.strftime('%d.%m.%y', time.gmtime(ev[-1][1]/1000))})")
+    rows = []
+    for s, T, r in ev:
+        try:
+            k = klines(s, "1", T - 60_000, T + 20 * 60_000, limit=200)
+        except Exception:
+            continue
+        rows.append((s, T, r, k))
+        time.sleep(0.05)
+    print(f"свечи есть для {len(rows)} событий · издержки {COST}% на сделку уже вычтены\n")
+    print("ВХОД ПО СТОРОНЕ ПЛАТЕЛЬЩИКОВ после сброса (лонги платили → лонг):")
+    print("вход      выход     n     среднее   в плюс    t     худший ход против (медиана / 10% хуже)")
+    for delay in (0, 1):
+        for hold in (2, 5, 10, 15):
+            res = [x for x in (with_payers(k, T, r, delay, hold) for _, T, r, k in rows) if x]
+            if not res:
+                continue
+            nets = [a for a, _ in res]
+            worst = sorted(b for _, b in res)
+            print(f"T+{delay}м    +{hold:>2}м   {len(nets):>5}   {statistics.mean(nets):+.3f}%   "
+                  f"{sum(x > 0 for x in nets)/len(nets)*100:>3.0f}%   {tstat(nets):+5.1f}   "
+                  f"{statistics.median(worst):+.2f}% / {worst[len(worst)//10]:+.2f}%")
+    base = lambda sel: [x[0] for x in (with_payers(k, T, r, 1, 5) for s, T, r, k in rows if sel(s, T, r)) if x]
+    half = rows[len(rows) // 2][1] if rows else 0
+    print("\nРАЗРЕЗЫ (вход T+1м, выход +5м — реалистичный вариант):")
+    for name, sel in (("лонги платили (ставка +)", lambda s, T, r: r > 0),
+                      ("шорты платили (ставка −)", lambda s, T, r: r < 0),
+                      ("|ставка| 0.1–0.2%", lambda s, T, r: abs(r) < 0.002),
+                      ("|ставка| 0.2–0.5%", lambda s, T, r: 0.002 <= abs(r) < 0.005),
+                      ("|ставка| ≥0.5%", lambda s, T, r: abs(r) >= 0.005),
+                      ("первая половина истории", lambda s, T, r: T < half),
+                      ("вторая половина истории", lambda s, T, r: T >= half)):
+        print(f"  {name:<26} {stats_line(base(sel))}")
+    top = {}
+    for s, T, r, k in rows:
+        x = with_payers(k, T, r, 1, 5)
+        if x:
+            top.setdefault(s, []).append(x[0])
+    conc = sorted(((len(v), s) for s, v in top.items()), reverse=True)[:5]
+    print("  чаще всего в выборке: " + ", ".join(f"{s.replace('USDT','')} ×{n}" for n, s in conc))
+
+
 def selftest():
     assert abs(tstat([1, 1, 1, 1]) - 0) < 1e-9  # zero variance → 0, no div-by-zero
     assert tstat([1, 2, 3, 4]) > 2
@@ -156,6 +242,13 @@ def selftest():
     assert abs(m["pre"] - 2.0) < 1e-9 and m["post30"] < 0
     assert abs(m["trade"] - (1.0 + 1.0 - 0.11)) < 1e-9, m  # +1% price, +1% funding, −0.11% fees
     assert event_moves(k[:2], T, 0.01) is None  # missing candles → skipped, not guessed
+    # longs paid (+) → go long at T+1m; price 100 → 103, dipped to 99 on the way
+    k2 = [(T + m * 60_000, 100.0 + m * 0.5, 100.0 + m * 0.5, 99.0 if m == 2 else 100.0 + m * 0.5, 100.0 + m * 0.5)
+          for m in range(0, 20)]
+    net, worst = with_payers(k2, T, +0.003, 1, 4)   # entry open@T+1 = 100.5, exit open@T+5 = 102.5
+    assert abs(net - ((102.5 - 100.5) / 100.5 * 100 - COST)) < 1e-9 and abs(worst - (99 - 100.5) / 100.5 * 100) < 1e-9
+    net_s, _ = with_payers(k2, T, -0.003, 1, 4)    # shorts paid → short into the same rise loses
+    assert net_s < 0
     print("study selftest ok")
 
 
@@ -167,5 +260,7 @@ if __name__ == "__main__":
         sessions()
     elif cmd == "funding":
         funding()
+    elif cmd == "settlement":
+        settlement()
     else:
         sys.exit(__doc__)
