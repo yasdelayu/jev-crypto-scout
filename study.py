@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""Research on Bybit history — turning a trader's intuitions into numbers.
+
+    python3 study.py sessions   # what each UTC hour / trading session does, and
+                                # whether the US session reverses Asia
+    python3 study.py funding    # price around extreme funding settlements:
+                                # T−30m → T → T+5/30/60m, betting against the payers
+    python3 study.py --selftest
+
+Only public market data, no keys. Run from a network Bybit doesn't geo-block.
+"""
+import statistics, sys, time
+
+import scalp
+
+MSK = 3  # UTC+3
+
+
+def klines(sym, interval, start_ms, end_ms, limit=1000):
+    """[(ts_ms, open, high, low, close)] oldest-first, paging backwards."""
+    out, end = [], end_ms
+    while end > start_ms:
+        rows = scalp.get_json(f"{scalp.BYBIT}/market/kline?category=linear&symbol={sym}"
+                              f"&interval={interval}&start={start_ms}&end={end}&limit={limit}")["list"]
+        if not rows:
+            break
+        out += [(int(c[0]), float(c[1]), float(c[2]), float(c[3]), float(c[4])) for c in rows]
+        if len(rows) < limit:
+            break
+        end = int(rows[-1][0]) - 1
+        time.sleep(0.1)
+    return sorted(set(out))
+
+
+def tstat(xs):
+    if len(xs) < 3 or statistics.pstdev(xs) == 0:
+        return 0.0
+    return statistics.mean(xs) / (statistics.stdev(xs) / len(xs) ** 0.5)
+
+
+def stats_line(xs):
+    return (f"n={len(xs):>4}  среднее {statistics.mean(xs):+.3f}%  "
+            f"в плюс {sum(x > 0 for x in xs) / len(xs) * 100:>3.0f}%  t={tstat(xs):+.1f}") if xs else "n=0"
+
+
+# ---------- сессии ----------
+
+SESSIONS = [("Азия (Токио)", 0, 7), ("Европа (Лондон)", 7, 13), ("Америка (Нью-Йорк)", 13, 20), ("ночь США", 20, 24)]
+
+
+def session_of(hour):
+    return next(name for name, a, b in SESSIONS if a <= hour < b)
+
+
+def sessions(coins=("BTCUSDT", "ETHUSDT", "SOLUSDT"), days=365):
+    now = int(time.time() * 1000)
+    for sym in coins:
+        k = klines(sym, "60", now - days * 86_400_000, now)
+        by_hour = {h: [] for h in range(24)}
+        days_map = {}
+        for ts, o, h, l, c in k:
+            g = time.gmtime(ts / 1000)
+            r = (c - o) / o * 100
+            by_hour[g.tm_hour].append((r, (h - l) / o * 100))
+            d = days_map.setdefault((g.tm_year, g.tm_yday), {n: 0.0 for n, _, _ in SESSIONS})
+            d[session_of(g.tm_hour)] += r
+        print(f"\n===== {sym}: {len(k)} часовых свечей за {days} дн. =====")
+        print("час UTC (МСК)   среднее    в плюс   размах ч   t")
+        for hr in range(24):
+            rs = [x[0] for x in by_hour[hr]]
+            rng = statistics.mean(x[1] for x in by_hour[hr])
+            mark = "  <-- " if abs(tstat(rs)) >= 2 else ""
+            print(f"  {hr:02d} ({(hr + MSK) % 24:02d})     {statistics.mean(rs):+.3f}%   "
+                  f"{sum(x > 0 for x in rs) / len(rs) * 100:>3.0f}%    {rng:.2f}%   {tstat(rs):+.1f}{mark}")
+        full = [d for d in days_map.values()]
+        for name, _, _ in SESSIONS:
+            print(f"  {name:<20} {stats_line([d[name] for d in full])}")
+        a = [d["Азия (Токио)"] for d in full]
+        e = [d["Европа (Лондон)"] for d in full]
+        u = [d["Америка (Нью-Йорк)"] for d in full]
+        print(f"  корреляция Азия→Америка {statistics.correlation(a, u):+.2f} · "
+              f"Европа→Америка {statistics.correlation(e, u):+.2f}  (минус = Америка разворачивает)")
+        # Америка против Азии, когда Азия сходила сильно
+        big = [(x, y) for x, y in zip(a, u) if abs(x) >= 2]
+        if big:
+            rev = sum(1 for x, y in big if x * y < 0)
+            print(f"  дни с Азией ≥±2% ({len(big)}): Америка пошла против Азии в {rev / len(big) * 100:.0f}% случаев")
+
+
+# ---------- фандинг у расчёта ----------
+
+def funding_events(min_abs=0.002, min_turnover=5e6):
+    tick = scalp.get_json(f"{scalp.BYBIT}/market/tickers?category=linear")["list"]
+    syms = [t["symbol"] for t in tick
+            if t["symbol"].endswith("USDT") and float(t.get("turnover24h") or 0) >= min_turnover]
+    ev = []
+    for s in syms:
+        try:
+            h = scalp.get_json(f"{scalp.BYBIT}/market/funding/history?category=linear&symbol={s}&limit=200")["list"]
+        except Exception:
+            continue
+        ev += [(s, int(x["fundingRateTimestamp"]), float(x["fundingRate"])) for x in h
+               if abs(float(x["fundingRate"])) >= min_abs]
+        time.sleep(0.05)
+    return ev, len(syms)
+
+
+def event_moves(k, T, rate):
+    """Signed % moves around settlement T, betting AGAINST the payers
+    (rate<0 → shorts pay → bet up). Opens of 1m candles at T−30, T, T+5, T+30, T+60."""
+    px = {ts: o for ts, o, *_ in k}
+    need = {m: T + m * 60_000 for m in (-30, 0, 5, 30, 60)}
+    if not all(v in px for v in need.values()):
+        return None
+    p = {m: px[v] for m, v in need.items()}
+    d = 1 if rate < 0 else -1
+    mv = lambda a, b: d * (p[b] - p[a]) / p[a] * 100
+    # «сделка»: вошёл за 30 мин по направлению против плательщиков, получил фандинг в T, вышел в T+5
+    fee = 0.11  # taker вход+выход, %
+    return {"pre": mv(-30, 0), "post5": mv(0, 5), "post30": mv(0, 30), "post60": mv(0, 60),
+            "trade": mv(-30, 5) + abs(rate) * 100 - fee}
+
+
+def funding(min_abs=0.002):
+    ev, n_syms = funding_events(min_abs)
+    print(f"\nперпов с оборотом ≥$5M: {n_syms}; расчётов с |ставкой| ≥ {min_abs * 100:.1f}%: {len(ev)}")
+    res = []
+    for s, T, r in ev:
+        try:
+            k = klines(s, "1", T - 3_600_000, T + 3_700_000, limit=200)
+        except Exception:
+            continue
+        m = event_moves(k, T, r)
+        if m:
+            res.append((abs(r), m))
+        time.sleep(0.05)
+    buckets = [("0.2–0.5%", 0.002, 0.005), ("0.5–1%", 0.005, 0.01), ("≥1%", 0.01, 9)]
+    for label, lo, hi in [("ВСЕ", 0, 9)] + buckets:
+        sub = [m for a, m in res if lo <= a < hi]
+        if not sub:
+            continue
+        print(f"\n|ставка| {label}  ({len(sub)} событий) — ставим ПРОТИВ тех, кто платит:")
+        for key, name in (("pre", "за 30 мин ДО сброса"), ("post5", "5 мин ПОСЛЕ"),
+                          ("post30", "30 мин после"), ("post60", "60 мин после"),
+                          ("trade", "СДЕЛКА: вход T−30, фандинг, выход T+5, минус комиссии")):
+            print(f"  {name:<52} {stats_line([m[key] for m in sub])}")
+
+
+def selftest():
+    assert abs(tstat([1, 1, 1, 1]) - 0) < 1e-9  # zero variance → 0, no div-by-zero
+    assert tstat([1, 2, 3, 4]) > 2
+    assert session_of(0) == "Азия (Токио)" and session_of(14) == "Америка (Нью-Йорк)" and session_of(23) == "ночь США"
+    T = 1_000_000_000_000
+    k = [(T + m * 60_000, p, p, p, p) for m, p in ((-30, 100.0), (0, 102.0), (5, 101.0), (30, 99.0), (60, 98.0))]
+    m = event_moves(k, T, -0.01)  # shorts pay 1% → bet up
+    assert abs(m["pre"] - 2.0) < 1e-9 and m["post30"] < 0
+    assert abs(m["trade"] - (1.0 + 1.0 - 0.11)) < 1e-9, m  # +1% price, +1% funding, −0.11% fees
+    assert event_moves(k[:2], T, 0.01) is None  # missing candles → skipped, not guessed
+    print("study selftest ok")
+
+
+if __name__ == "__main__":
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd == "--selftest":
+        selftest()
+    elif cmd == "sessions":
+        sessions()
+    elif cmd == "funding":
+        funding()
+    else:
+        sys.exit(__doc__)
