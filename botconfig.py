@@ -16,10 +16,11 @@ DEFAULTS = {
     "listings": True,    # листинги/делистинги
     "news": True,        # разбор новостей через Jev
     "attention": True,   # Jev-подсказки «на что смотреть»
+    "radar": True,       # фандинг-радар по всему рынку Bybit (1 запрос)
     "ta_limit": 30,      # на больших списках осцилляторы/scalp только по N подвижным
 }
 
-BOOL_KEYS = ["ta", "fng", "scalp", "listings", "news", "attention"]
+BOOL_KEYS = ["ta", "fng", "scalp", "listings", "news", "attention", "radar"]
 
 
 def load():
@@ -48,6 +49,8 @@ def to_argv(cfg):
         argv.append("--scalp")
     if cfg.get("listings"):
         argv.append("--listings")
+    if cfg.get("radar"):
+        argv.append("--radar")
     if cfg.get("news"):
         argv += ["--news", "--lang", cfg.get("lang", "ru")]
     if cfg.get("attention"):

@@ -78,7 +78,7 @@ def _fund_dir(f):
     return f"{who} ({rate_str}, z={z:+.1f})"
 
 
-def format_digest(ranked, judged=None, scalp_results=None, context=None, listings_data=None, priorities=None, top_n=8):
+def format_digest(ranked, judged=None, scalp_results=None, context=None, listings_data=None, priorities=None, top_n=8, radar=None):
     """Digest for a phone: Jev's 'what to look at' first (the point of the
     whole thing), then market mood, top movers, funding skew, Jev news flags
     (clickable links), listings/delistings, and a legend."""
@@ -137,6 +137,12 @@ def format_digest(ranked, judged=None, scalp_results=None, context=None, listing
                 titled = f'<a href="{html.escape(link)}">{title}</a>' if link else title
                 lines.append(f"{emoji} <code>{coins}</code> [{html.escape(j['catalyst'])}] {titled}")
 
+    if radar:
+        import scalp
+        lines.append("\n<b>🧲 Фандинг-радар</b> (весь Bybit, где платят больше всего):")
+        for r in radar:
+            lines.append(f"<code>{html.escape(r['symbol'].replace('USDT', '')):<8}</code> {html.escape(scalp.format_radar_line(r))}")
+
     if listings_data:
         lines.append("\n<b>📋 Листинги/делистинги (Bybit):</b>")
         for l in listings_data[:8]:
@@ -150,13 +156,14 @@ def format_digest(ranked, judged=None, scalp_results=None, context=None, listing
         "📰 — новостной балл (сумма настроений по монете)\n"
         "⚠️ oversold/overbought — перепродано/перекуплено (RSI)\n"
         "⚡ фандинг: 🔴 лонги платят (толпа в лонг), 🟢 шорты платят\n"
+        "🧲 радар: ставка за период и в годовых (0.01%/8ч ≈ 11% годовых — норма)\n"
         "📈/📉 — листинг/делистинг на бирже")
     lines.append("\n<i>Скрининг, не сигнал на сделку.</i>")
     return "\n".join(lines)
 
 
-def notify(ranked, judged=None, scalp_results=None, context=None, listings_data=None, priorities=None):
-    return _send(format_digest(ranked, judged, scalp_results, context, listings_data, priorities))
+def notify(ranked, judged=None, scalp_results=None, context=None, listings_data=None, priorities=None, radar=None):
+    return _send(format_digest(ranked, judged, scalp_results, context, listings_data, priorities, radar=radar))
 
 
 def send_text(text):

@@ -401,6 +401,8 @@ if __name__ == "__main__":
                     help="дописать этот прогон в history.db (SQLite) — фундамент для validate.py")
     p.add_argument("--telegram", action="store_true",
                     help="отправить краткий дайджест в Telegram (нужны TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID)")
+    p.add_argument("--radar", action="store_true",
+                    help="+ фандинг-радар: самые высокие ставки по ВСЕМ перпам Bybit (1 запрос)")
     p.add_argument("--channel", action="store_true",
                     help="пост дня в публичный канал CHANNEL_ID (флаги + вердикт по вчерашним, см. channel.py)")
     p.add_argument("--channel-preview", action="store_true",
@@ -482,6 +484,14 @@ if __name__ == "__main__":
             scalp_results = list(pool.map(
                 lambda s: scalp_mod.scan_symbol(s, instruments.get(s, {}).get("funding_interval_min", 480)), symbols))
 
+    radar = None
+    if args.radar:
+        import scalp as scalp_mod
+        try:
+            radar = scalp_mod.funding_radar()
+        except Exception as e:
+            print(colors.dim(f"🧲 фандинг-радар недоступен: {e}"))
+
     jev = None
     if args.news or args.attention:
         provider, key = pick_provider()
@@ -506,6 +516,11 @@ if __name__ == "__main__":
     print_report(ranked, judged, age_map, show_osc=args.ta, context=context,
                  scalp_results=scalp_results, listings_data=listings_data, priorities=priorities)
 
+    if radar:
+        print("\n" + colors.bold("🧲 Фандинг-радар (весь Bybit):"))
+        for r in radar:
+            print(f"  {r['symbol'].replace('USDT', ''):<10} {scalp_mod.format_radar_line(r)}")
+
     if args.save:
         json.dump({"coins": ranked, "news": judged}, open(args.save, "w"), ensure_ascii=False, indent=1)
         print(f"\nсырые данные -> {args.save}")
@@ -527,7 +542,8 @@ if __name__ == "__main__":
         import telegram_notify
         try:
             telegram_notify.notify(ranked, judged=judged, scalp_results=scalp_results,
-                                   context=context, listings_data=listings_data, priorities=priorities)
+                                   context=context, listings_data=listings_data, priorities=priorities,
+                                   radar=radar)
             print("дайджест отправлен в Telegram")
         except Exception as e:
             print(f"не удалось отправить в Telegram: {e}", file=sys.stderr)

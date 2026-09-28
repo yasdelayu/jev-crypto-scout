@@ -144,6 +144,39 @@ def format_funding_note(f):
     return f"{f['direction']} · {rate} · z={f['z']:+.1f} ({f['streak_periods']}×{f['interval_hours']:.0f}ч подряд) · сброс через {reset}"
 
 
+def funding_radar(min_turnover=5e6, top=8, instruments=None):
+    """Whole-market funding scan: ONE tickers call covers every Bybit USDT perp
+    (~780), not just our top-100 — the most extreme rates live on small caps.
+    Rates are per settlement, and intervals differ (1h/4h/8h), so everything is
+    normalised to 'per 8h' and to a yearly figure before ranking. min_turnover
+    drops dead coins whose rate is extreme but untradeable."""
+    rows = get_json(f"{BYBIT}/market/tickers?category=linear")["list"]
+    if instruments is None:
+        instruments = fetch_instruments() or {}
+    now_ms = time.time() * 1000
+    out = []
+    for t in rows:
+        sym = t["symbol"]
+        if not sym.endswith("USDT") or not t.get("fundingRate") or float(t.get("turnover24h") or 0) < min_turnover:
+            continue
+        rate = float(t["fundingRate"])
+        ih = instruments.get(sym, {}).get("funding_interval_min", 480) / 60
+        nxt = int(t.get("nextFundingTime") or 0)
+        out.append({"symbol": sym, "rate": rate, "interval_h": ih,
+                    "per8h": rate * 8 / ih, "apr": rate * (24 / ih) * 365 * 100,
+                    "turnover": float(t["turnover24h"]),
+                    "next_reset_min": max(0, round((nxt - now_ms) / 60000)) if nxt else None})
+    return sorted(out, key=lambda x: abs(x["per8h"]), reverse=True)[:top]
+
+
+def format_radar_line(r):
+    who = "лонги платят шортам" if r["rate"] > 0 else "шорты платят лонгам"
+    m = r["next_reset_min"]
+    reset = f" · сброс {m // 60}ч{m % 60:02d}м" if m is not None else ""
+    return (f"{r['rate']*100:+.3f}%/{r['interval_h']:.0f}ч ≈ {r['apr']:+.0f}% годовых · {who}"
+            f" · оборот ${r['turnover']/1e6:,.0f}M{reset}")
+
+
 def short_horizon_oscillators(symbol, interval="1", limit=120):
     """RSI/Stochastic/MACD/Bollinger on 1-minute candles — same formulas as
     scout.py's --ta, just a much shorter timeframe. Bybit returns newest
@@ -275,6 +308,22 @@ def selftest():
     if r["funding"]["z"] > 1.5 and r["osc"]["signal"] == "overbought":
         reasons.append("ok")
     assert reasons, "crowded-long+overbought should flag a candidate"
+
+    # radar normalisation, offline: 0.1% per 1h beats 0.5% per 8h once both are per-8h
+    global get_json
+    real = get_json
+    get_json = lambda url, timeout=15: {"list": [
+        {"symbol": "AUSDT", "fundingRate": "0.005", "turnover24h": "9e6", "nextFundingTime": "0"},
+        {"symbol": "BUSDT", "fundingRate": "-0.001", "turnover24h": "9e6", "nextFundingTime": "0"},
+        {"symbol": "DEADUSDT", "fundingRate": "0.05", "turnover24h": "1000", "nextFundingTime": "0"},
+        {"symbol": "BTCPERP", "fundingRate": "0.9", "turnover24h": "9e9", "nextFundingTime": "0"}]}
+    try:
+        r = funding_radar(instruments={"AUSDT": {"funding_interval_min": 480}, "BUSDT": {"funding_interval_min": 60}})
+    finally:
+        get_json = real
+    assert [x["symbol"] for x in r] == ["BUSDT", "AUSDT"], r   # dead coin and non-USDT dropped
+    assert abs(r[0]["per8h"] + 0.008) < 1e-12 and abs(r[1]["apr"] - 547.5) < 1e-6, r
+    assert "шорты платят лонгам" in format_radar_line(r[0]) and "годовых" in format_radar_line(r[0])
     print("scalp selftest ok")
 
 
