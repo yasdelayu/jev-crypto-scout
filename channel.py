@@ -130,7 +130,10 @@ def format_post(date, context, verdicts, picks, rec, scalp_results, priorities, 
     if w + l:
         lines.append(f"🧾 Счёт канала: <b>{w}✅ / {l}❌</b> · сумма {tot:+.1f}%")
 
-    lines.append("\n🚩 <b>Флаги дня</b> — правило ставит против перегиба:")
+    lines.append("\n🧪 <b>Флаги дня</b> — публичный эксперимент: правило ставит против перегиба")
+    if acct and acct["trades"] and acct["pnl_pct"] < 0:
+        lines.append(f"<i>⚠️ правило сейчас в минусе ({acct['pnl_pct']:+.1f}% на демо) — не повторяй сделки, "
+                     f"мы проверяем, работает ли оно, а не советуем</i>")
     if picks:
         for p in picks:
             icon = "🟢" if p["dir"] == "long" else "🔴"
@@ -273,6 +276,8 @@ def selftest():
     assert len(txt) < 4096
     empty = format_post("28.09", None, [], [], (0, 0, 0), None, None, None)
     assert "правило молчит" in empty
+    losing = format_post("28.09", None, [], picks, (0, 0, 0), None, None, {"trades": 5, "balance": 9000, "pnl_pct": -10.0})
+    assert "в минусе" in losing and "не повторяй" in losing  # a losing rule is labelled as such next to its flags
     print("channel selftest ok")
 
 
