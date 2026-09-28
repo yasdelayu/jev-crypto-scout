@@ -10,6 +10,9 @@
     python3 study.py ticks      # same on tick data (public.bybit.com): entry +0.25s…+30s
     python3 study.py fresh      # funding JUST turned anomalous (premium index, 5m): enter,
                                 # exit before the payout — with the crowd vs against it
+    python3 study.py spikes     # fresh ≥0.5% spikes over 90d: hold 1–12h WITH the crowd,
+                                # funding actually paid counted; how long anomalies last
+    python3 study.py btc        # BTC daily since Oct 2024: key dates, biggest days, months
     python3 study.py --selftest
 
 Only public market data, no keys. Run from a network Bybit doesn't geo-block.
@@ -391,22 +394,116 @@ def fresh_trades(prem, px, interval_ms, thr, hold):
     return res
 
 
-def fresh(days=30, workers=4):
+def load_premium_price(days, workers=4, with_funding=False):
+    """[(sym, premium_5m, price_5m, funding_history)] for every liquid USDT perp."""
     from concurrent.futures import ThreadPoolExecutor
     tick = scalp.get_json(f"{scalp.BYBIT}/market/tickers?category=linear")["list"]
     syms = [t["symbol"] for t in tick if t["symbol"].endswith("USDT") and float(t.get("turnover24h") or 0) >= 5e6]
-    inst = scalp.fetch_instruments() or {}
     now = int(time.time() * 1000) // BAR * BAR
     start = now - days * 86_400_000
 
     def one(s):
         try:
-            return s, klines(s, "5", start, now, kind="premium-index-price-kline"), klines(s, "5", start, now)
+            return (s, klines(s, "5", start, now, kind="premium-index-price-kline"), klines(s, "5", start, now),
+                    funding_history(s, pages=5) if with_funding else [])
         except Exception:
-            return s, None, None
+            return s, None, None, None
 
     with ThreadPoolExecutor(workers) as pool:
-        data = [d for d in pool.map(one, syms) if d[1] and d[2]]
+        return [d for d in pool.map(one, syms) if d[1] and d[2]], len(syms)
+
+
+SPIKE_H = (1, 2, 3, 6, 9, 12)
+
+
+def spike_path(prem, px, fund, thr, quiet=12):
+    """For each fresh spike: WITH-crowd net % at +H hours (entry next bar open),
+    after costs AND the funding actually paid/received at every settlement crossed;
+    plus how long the anomaly lasted (hours until |premium| < thr/2)."""
+    opens = {ts: o for ts, o, *_ in px}
+    out, busy = [], 0
+    for i, sign in fresh_signals(prem, thr, quiet):
+        t_in = prem[i][0] + BAR
+        if t_in < busy or t_in not in opens:
+            continue
+        busy = t_in + 3 * 3_600_000
+        end = next((j for j in range(i + 1, len(prem)) if abs(prem[j][4]) < thr / 2), None)
+        dur = (prem[end][0] - prem[i][0]) / 3_600_000 if end is not None else None
+        e = opens[t_in]
+        row = {"t": t_in, "dur": dur}
+        for H in SPIKE_H:
+            t_out = t_in + H * 3_600_000
+            if t_out not in opens:
+                break
+            paid = sum(sign * r * 100 for T, r in fund if t_in < T <= t_out)  # лонг платит +ставку
+            row[H] = sign * (opens[t_out] - e) / e * 100 - paid - COST
+        if len(row) > 2:
+            out.append(row)
+    return out
+
+
+def spikes(days=90, thr=0.005):
+    data, n = load_premium_price(days, with_funding=True)
+    rows = []
+    for s, prem, px, fund in data:
+        rows += [dict(r, sym=s) for r in spike_path(prem, px, fund, thr)]
+    print(f"\nмонет {len(data)} из {n} · {days} дн. · свежий всплеск |premium| ≥ {thr*100:.1f}% · "
+          f"всплесков: {len(rows)} · вход С ТОЛПОЙ на следующем 5-мин баре")
+    print("держим    (после комиссий И фактически уплаченного/полученного фандинга)")
+    for H in SPIKE_H:
+        print(f"  {H:>2} ч   {stats_line([r[H] for r in rows if H in r])}")
+    durs = sorted(r["dur"] for r in rows if r["dur"] is not None)
+    if durs:
+        q = lambda p: durs[min(len(durs) - 1, int(len(durs) * p))]
+        print(f"\nсколько держится аномалия (пока |premium| не упадёт вдвое): медиана {q(0.5):.1f} ч · "
+              f"четверть короче {q(0.25):.1f} ч · четверть дольше {q(0.75):.1f} ч")
+        for a, b in ((0, 1), (1, 3), (3, 9), (9, 999)):
+            print(f"  {a}–{b if b < 999 else '∞'} ч: {sum(a <= d < b for d in durs) / len(durs) * 100:.0f}%")
+    mid = sorted(r["t"] for r in rows)[len(rows) // 2] if rows else 0
+    for name, sel in (("первая половина", lambda r: r["t"] < mid), ("вторая половина", lambda r: r["t"] >= mid)):
+        print(f"  3 ч, {name}: {stats_line([r[3] for r in rows if sel(r) and 3 in r])}")
+    top = {}
+    for r in rows:
+        top[r["sym"]] = top.get(r["sym"], 0) + 1
+    print("  больше всего всплесков: " + ", ".join(f"{s.replace('USDT', '')} ×{c}" for s, c in
+                                                  sorted(top.items(), key=lambda x: -x[1])[:8]))
+
+
+def btc_timeline(start="2024-10-01"):
+    """Daily BTC since `start`: key dates and the biggest daily moves."""
+    import calendar
+    t0 = calendar.timegm(time.strptime(start, "%Y-%m-%d")) * 1000
+    k = klines("BTCUSDT", "D", t0, int(time.time() * 1000))
+    day = lambda ts: time.strftime("%Y-%m-%d", time.gmtime(ts / 1000))
+    close = {day(ts): c for ts, o, h, l, c in k}
+    print(f"\nBTC дневки с {start}: {len(k)} дней")
+    for d, label in (("2024-11-05", "выборы в США"), ("2024-11-06", "итог выборов"), ("2024-12-17", ""),
+                     ("2025-01-17", "запуск мемкоина $TRUMP"), ("2025-01-20", "инаугурация"),
+                     ("2025-03-02", "пост про крипто-резерв"), ("2025-04-07", "тарифы, обвал рынков"),
+                     ("2025-07-14", ""), ("2025-10-06", ""), ("2025-10-10", "пост про тарифы Китаю, ликвидации"),
+                     ("2026-01-02", ""), ("2026-06-01", "")):
+        if d in close:
+            print(f"  {d}  ${close[d]:>9,.0f}  {label}")
+    hi = max(k, key=lambda x: x[2])
+    lo_after = min((x for x in k if x[0] > hi[0]), key=lambda x: x[3], default=None)
+    print(f"  максимум: ${hi[2]:,.0f} ({day(hi[0])})" +
+          (f" · минимум после него: ${lo_after[3]:,.0f} ({day(lo_after[0])}, "
+           f"{(lo_after[3] / hi[2] - 1) * 100:+.0f}%)" if lo_after else ""))
+    print(f"  сейчас: ${k[-1][4]:,.0f} ({day(k[-1][0])})")
+    moves = sorted(((c - o) / o * 100, day(ts), (h - l) / o * 100) for ts, o, h, l, c in k)
+    print("  самые сильные дни вниз: " + " · ".join(f"{d} {m:+.1f}%" for m, d, _ in moves[:8]))
+    print("  самые сильные дни вверх: " + " · ".join(f"{d} {m:+.1f}%" for m, d, _ in moves[-8:][::-1]))
+    months = {}
+    for ts, o, h, l, c in k:
+        months.setdefault(day(ts)[:7], []).append((o, c))
+    print("  по месяцам: " + " · ".join(f"{m[2:]} {(v[-1][1] / v[0][0] - 1) * 100:+.0f}%" for m, v in months.items()))
+
+
+def fresh(days=30, workers=4):
+    inst = scalp.fetch_instruments() or {}
+    data, n = load_premium_price(days, workers)
+    syms = [None] * n
+    data = [(s, p, x) for s, p, x, _ in data]
     print(f"\nмонет: {len(data)} из {len(syms)} · {days} дн. · 5-мин premium index + цена · "
           f"вход на следующем баре после сигнала, выход ДО выплаты · издержки {COST}% вычтены")
     for thr in FRESH_THR:
@@ -477,6 +574,13 @@ def selftest():
     px2 = [(near + i * BAR, 100.0, 0, 0, 0) for i in range(80)]
     (r, t_in), = fresh_trades(prem2, px2, 8 * 3_600_000, 0.002, 48)
     assert t_in == near + 13 * BAR
+    # spike path: long from 113 (bar 13), +1h = bar 25 open 125; settlement at bar 20 charged +0.1% (longs pay)
+    fund = [(base + 20 * BAR, 0.001)]
+    prem3 = [(base + i * BAR, 0, 0, 0, 0.0003 if i < 12 or i > 30 else 0.006) for i in range(200)]
+    px3 = [(base + i * BAR, 100.0 + i, 0, 0, 0) for i in range(200)]
+    (row,) = spike_path(prem3, px3, fund, 0.005)
+    assert abs(row[1] - ((125 - 113) / 113 * 100 - 0.1 - COST)) < 1e-9, row
+    assert abs(row["dur"] - 19 * BAR / 3_600_000) < 1e-9  # anomaly bar 12 → calm at bar 31
     print("study selftest ok")
 
 
@@ -494,5 +598,9 @@ if __name__ == "__main__":
         settlement_ticks()
     elif cmd == "fresh":
         fresh()
+    elif cmd == "spikes":
+        spikes()
+    elif cmd == "btc":
+        btc_timeline()
     else:
         sys.exit(__doc__)
