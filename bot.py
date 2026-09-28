@@ -25,9 +25,10 @@ CHANNEL = os.environ.get("CHANNEL_ID", "")
 MENU = [["⚡ Быстро", "📊 Полный прогон"],
         ["💼 Демо-счёт", "⚖️ Стопы"],
         ["📈 Самопроверка", "⚙️ Настройки"],
-        ["📡 Канал", "❓ Помощь"]]
+        ["🐋 Киты", "📡 Канал"],
+        ["❓ Помощь"]]
 MENU_ACTIONS = dict(zip([b for row in MENU for b in row],
-                        ["quick", "run", "paper", "compare", "stats", "settings", "channel", "help"]))
+                        ["quick", "run", "paper", "compare", "stats", "settings", "whales", "channel", "help"]))
 KEYBOARD = {"keyboard": [[{"text": b} for b in row] for row in MENU],
             "resize_keyboard": True, "is_persistent": True}
 
@@ -49,6 +50,7 @@ HELP = """<b>🤖 Jev Crypto Scout</b>
 🧪 /rules — все правила входа на одном движке (RSI, 🎯 фандинг+перегиб, против толпы) со значимостью
 📈 <b>Самопроверка</b> — есть ли у сигналов эдж против случайной монеты (со значимостью)
 ⚙️ <b>Настройки</b> — сколько монет, язык, какие блоки (кнопками)
+🐋 <b>Киты</b> — где сейчас стоят топ-трейдеры Hyperliquid и их последние крупные входы/выходы (алерты приходят сами)
 📡 <b>Канал</b> — публичный канал: превью, публикация, счёт
 
 /legend — что значат все значки в сводке
@@ -298,6 +300,11 @@ def handle(text):
         bg(compare_screen, int(arg) if arg.isdigit() else 24)
     elif cmd == "settings":
         send(*settings_view(cfg))
+    elif cmd == "whales":
+        import whales
+        conn = whales.connect()
+        send(whales.summary_text(conn))
+        conn.close()
     elif cmd == "channel":
         send(*channel_view())
     elif cmd == "run":
@@ -364,6 +371,7 @@ def main():
         {"command": "paper", "description": "демо-счёт"},
         {"command": "compare", "description": "сравнить стопы"},
         {"command": "rules", "description": "сравнить правила входа"},
+        {"command": "whales", "description": "киты Hyperliquid"},
         {"command": "legend", "description": "что значат значки"}])
     send("🤖 Бот перезапущен. Меню внизу 👇", KEYBOARD)
     offset = None
@@ -395,7 +403,7 @@ def main():
 
 def selftest():
     # every menu label routes to a real command
-    assert set(MENU_ACTIONS.values()) == {"quick", "run", "paper", "compare", "stats", "settings", "channel", "help"}
+    assert set(MENU_ACTIONS.values()) == {"quick", "run", "paper", "compare", "stats", "settings", "whales", "channel", "help"}
     cfg = dict(botconfig.DEFAULTS, top=50, scalp=False)
     text, kb = settings_view(cfg)
     flat = [b for row in kb["inline_keyboard"] for b in row]

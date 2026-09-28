@@ -26,3 +26,5 @@ jobs:
           python3 validate.py --selftest
           python3 paper.py --selftest
           python3 channel.py
+          python3 whales.py --selftest
+          python3 study.py --selftest

@@ -1,0 +1,15 @@
+[Unit]
+Description=Jev Crypto Scout — whale radar (Hyperliquid top traders, poll every 2 min)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/jev-crypto-scout
+EnvironmentFile=/opt/jev-crypto-scout/.env
+ExecStart=/usr/bin/python3 /opt/jev-crypto-scout/whales.py --loop 120
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
