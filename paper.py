@@ -118,10 +118,14 @@ def simulate(conn, horizon_h=24, stop_pct=STOP_PCT, risk_pct=RISK_PCT, paths=Non
         "WHERE signal IN ('oversold','overbought') AND price IS NOT NULL ORDER BY ts ASC").fetchall()
     balance = START_BALANCE
     trades, wins, approx, fees = [], 0, 0, 0.0
+    busy_until = {}  # одна позиция на монету: флаг держится несколько прогонов подряд — это ОДИН перегиб, не 6 сделок
     for symbol, ts, entry, signal in rows:
+        if ts < busy_until.get(symbol, 0):
+            continue
         exit_ts, exit_price = _price_after(conn, symbol, ts, horizon_h * 3600)
         if not exit_price:
             continue  # позиция ещё «открыта» — нет цены выхода в истории
+        busy_until[symbol] = exit_ts
         direction = 1 if signal == "oversold" else -1  # long / short
         raw_ret = direction * (exit_price - entry) / entry
         # стоп: intrabar по реальным свечам, если есть путь; иначе — на горизонте
@@ -249,6 +253,13 @@ def selftest():
     connw.execute("INSERT INTO scout_runs (ts,symbol,price,signal) VALUES (?,?,?,?)", (now + 25*3600, "W", 100.1, None))  # +0.1%
     connw.commit()
     assert simulate(connw, 24)["winrate"] == 0.0, "+0.1% < 0.21% costs must not count as a win"
+    # the same oversold episode logged by 3 consecutive 4h runs is ONE trade, not three
+    connd = history.connect(":memory:")
+    for k in range(3):
+        connd.execute("INSERT INTO scout_runs (ts,symbol,price,signal) VALUES (?,?,?,?)", (now + k*4*3600, "D", 100.0, "oversold"))
+    connd.execute("INSERT INTO scout_runs (ts,symbol,price,signal) VALUES (?,?,?,?)", (now + 40*3600, "D", 105.0, None))
+    connd.commit()
+    assert simulate(connd, 24)["trades"] == 1, "overlapping re-entries on one coin must collapse"
 
     # risk-management core: a move to the stop loses EXACTLY risk_pct of capital
     conn2 = history.connect(":memory:")
