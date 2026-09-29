@@ -1,0 +1,15 @@
+[Unit]
+Description=Jev Crypto Scout — live alerts (funding spikes + liquidation cascades)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/jev-crypto-scout
+EnvironmentFile=/opt/jev-crypto-scout/.env
+ExecStart=/usr/bin/python3 /opt/jev-crypto-scout/live.py
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

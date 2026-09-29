@@ -144,7 +144,7 @@ def format_funding_note(f):
     return f"{f['direction']} · {rate} · z={f['z']:+.1f} ({f['streak_periods']}×{f['interval_hours']:.0f}ч подряд) · сброс через {reset}"
 
 
-def funding_radar(min_turnover=5e6, top=8, instruments=None):
+def funding_radar(min_turnover=3e5, top=8, instruments=None):
     """Whole-market funding scan: ONE tickers call covers every Bybit USDT perp
     (~780), not just our top-100 — the most extreme rates live on small caps.
     Rates are per settlement, and intervals differ (1h/4h/8h), so everything is
@@ -166,15 +166,15 @@ def funding_radar(min_turnover=5e6, top=8, instruments=None):
                     "per8h": rate * 8 / ih, "apr": rate * (24 / ih) * 365 * 100,
                     "turnover": float(t["turnover24h"]),
                     "next_reset_min": max(0, round((nxt - now_ms) / 60000)) if nxt else None})
-    return sorted(out, key=lambda x: abs(x["per8h"]), reverse=True)[:top]
+    return sorted(out, key=lambda x: abs(x["rate"]), reverse=True)[:top]  # как на бирже: ставка за период
 
 
 def format_radar_line(r):
     who = "лонги платят шортам" if r["rate"] > 0 else "шорты платят лонгам"
     m = r["next_reset_min"]
     reset = f" · сброс {m // 60}ч{m % 60:02d}м" if m is not None else ""
-    return (f"{r['rate']*100:+.3f}%/{r['interval_h']:.0f}ч ≈ {r['apr']:+.0f}% годовых · {who}"
-            f" · оборот ${r['turnover']/1e6:,.0f}M{reset}")
+    return (f"{r['rate']*100:+.3f}% за {r['interval_h']:g}ч-период · {who}"
+            f" · оборот ${r['turnover']/1e6:,.1f}M{reset}")
 
 
 def short_horizon_oscillators(symbol, interval="1", limit=120):
@@ -321,9 +321,10 @@ def selftest():
         r = funding_radar(instruments={"AUSDT": {"funding_interval_min": 480}, "BUSDT": {"funding_interval_min": 60}})
     finally:
         get_json = real
-    assert [x["symbol"] for x in r] == ["BUSDT", "AUSDT"], r   # dead coin and non-USDT dropped
-    assert abs(r[0]["per8h"] + 0.008) < 1e-12 and abs(r[1]["apr"] - 547.5) < 1e-6, r
-    assert "шорты платят лонгам" in format_radar_line(r[0]) and "годовых" in format_radar_line(r[0])
+    assert [x["symbol"] for x in r] == ["AUSDT", "BUSDT"], r   # dead coin and non-USDT dropped; raw rate order
+    assert abs(r[1]["per8h"] + 0.008) < 1e-12 and abs(r[0]["apr"] - 547.5) < 1e-6, r
+    line = format_radar_line(r[1])
+    assert "шорты платят лонгам" in line and "за 1ч-период" in line and "годовых" not in line
     print("scalp selftest ok")
 
 

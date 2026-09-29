@@ -25,16 +25,19 @@ CHANNEL = os.environ.get("CHANNEL_ID", "")
 MENU = [["⚡ Быстро", "📊 Полный прогон"],
         ["💼 Демо-счёт", "⚖️ Стопы"],
         ["📈 Самопроверка", "⚙️ Настройки"],
-        ["🐋 Киты", "📡 Канал"],
+        ["🐋 Киты", "⚡ Фандинг"],
+        ["💥 Ликвидации", "📡 Канал"],
         ["❓ Помощь"]]
 MENU_ACTIONS = dict(zip([b for row in MENU for b in row],
-                        ["quick", "run", "paper", "compare", "stats", "settings", "whales", "channel", "help"]))
+                        ["quick", "run", "paper", "compare", "stats", "settings", "whales", "funding", "liq",
+                         "channel", "help"]))
 KEYBOARD = {"keyboard": [[{"text": b} for b in row] for row in MENU],
             "resize_keyboard": True, "is_persistent": True}
 
 TOGGLES = [("ta", "осцилляторы"), ("scalp", "фандинг"), ("fng", "фон рынка"),
            ("listings", "листинги"), ("news", "новости Jev"), ("attention", "куда смотреть"),
-           ("radar", "фандинг-радар")]
+           ("radar", "фандинг-радар"), ("fund_alerts", "⚡ алерты фандинга"), ("liq_alerts", "💥 алерты ликвидаций")]
+FUND_CHOICES = [0.5, 1.0, 1.5, 2.0]
 TOP_CHOICES = [20, 50, 100, 150]
 HORIZONS = [(24, "24ч"), (48, "48ч"), (168, "7д")]
 
@@ -50,6 +53,8 @@ HELP = """<b>🤖 Jev Crypto Scout</b>
 🧪 /rules — все правила входа на одном движке (RSI, 🎯 фандинг+перегиб, против толпы) со значимостью
 📈 <b>Самопроверка</b> — есть ли у сигналов эдж против случайной монеты (со значимостью)
 ⚙️ <b>Настройки</b> — сколько монет, язык, какие блоки (кнопками)
+⚡ <b>Фандинг</b> — самые большие ставки за период по всему Bybit прямо сейчас (алерт от ±1% приходит сам)
+💥 <b>Ликвидации</b> — кого выносит за последний час; каскад приходит алертом сразу
 🐋 <b>Киты</b> — где сейчас стоят топ-трейдеры Hyperliquid и их последние крупные входы/выходы (алерты приходят сами)
 📡 <b>Канал</b> — публичный канал: превью, публикация, счёт
 
@@ -72,7 +77,7 @@ LEGEND = """<b>ℹ️ Все значки сводки:</b>
 ставка +0.01% — реальная ставка (как на бирже Bybit)
 z=+2.1 — насколько ставка аномальна vs её истории (НЕ проценты! z≠ставка)
 🎯 — редкий двойной сигнал (фандинг + осциллятор)
-🧲 радар — самые большие ставки по ВСЕМ монетам Bybit: ставка за период (1ч/4ч/8ч) и в годовых. Норма ≈ 0.01%/8ч ≈ 11% годовых; 0.1%/8ч ≈ 110% годовых — уже много
+🧲 радар / ⚡ фандинг — самые большие ставки по ВСЕМ монетам Bybit за период монеты (1ч/4ч/8ч), как на бирже. Норма ≈ 0.01%; ±1% и больше — всплеск, приходит алертом
 
 <b>Новости:</b>
 🟢 хорошо для цены / 🔴 плохо
@@ -179,11 +184,14 @@ def paths():
 def settings_view(cfg):
     on = lambda k: "✅" if cfg.get(k) else "▫️"
     text = (f"<b>⚙️ Настройки</b>\n"
-            f"Монет: <b>{cfg['top']}</b> · новости: <b>{cfg['lang']}</b>\n"
+            f"Монет: <b>{cfg['top']}</b> · новости: <b>{cfg['lang']}</b> · "
+            f"алерт фандинга от <b>±{float(cfg.get('fund_alert', 1)):g}%</b> за период\n"
             f"Меняется сразу и для прогонов по расписанию (каждые 4ч).")
     rows = [[btn(("● " if cfg["top"] == n else "") + str(n), f"top:{n}") for n in TOP_CHOICES]]
     for i in range(0, len(TOGGLES), 2):
         rows.append([btn(f"{on(k)} {label}", f"tg:{k}") for k, label in TOGGLES[i:i + 2]])
+    rows.append([btn(("● " if float(cfg.get("fund_alert", 1)) == v else "") + f"⚡±{v:g}%", f"fa:{v}")
+                 for v in FUND_CHOICES])
     rows.append([btn(("● " if cfg["lang"] == l else "") + name, f"lang:{l}")
                  for l, name in (("ru", "🇷🇺 новости RU"), ("en", "🇬🇧 новости EN"))])
     return text, ikb(*rows)
@@ -300,6 +308,14 @@ def handle(text):
         bg(compare_screen, int(arg) if arg.isdigit() else 24)
     elif cmd == "settings":
         send(*settings_view(cfg))
+    elif cmd == "funding":
+        import live
+        send(live.funding_text(float(cfg.get("fund_alert", 1))))
+    elif cmd == "liq":
+        import live
+        conn = live.connect()
+        send(live.summary_text(conn))
+        conn.close()
     elif cmd == "whales":
         import whales
         conn = whales.connect()
@@ -344,6 +360,9 @@ def on_callback(q):
     elif kind == "tg" and val in botconfig.BOOL_KEYS:
         cfg[val] = not cfg.get(val); botconfig.save(cfg)
         edit(msg_id, *settings_view(cfg))
+    elif kind == "fa":
+        cfg["fund_alert"] = float(val); botconfig.save(cfg)
+        edit(msg_id, *settings_view(cfg))
     elif kind == "lang" and val in ("ru", "en"):
         cfg["lang"] = val; botconfig.save(cfg)
         edit(msg_id, *settings_view(cfg))
@@ -372,6 +391,8 @@ def main():
         {"command": "compare", "description": "сравнить стопы"},
         {"command": "rules", "description": "сравнить правила входа"},
         {"command": "whales", "description": "киты Hyperliquid"},
+        {"command": "funding", "description": "фандинг сейчас"},
+        {"command": "liq", "description": "ликвидации за час"},
         {"command": "legend", "description": "что значат значки"}])
     send("🤖 Бот перезапущен. Меню внизу 👇", KEYBOARD)
     offset = None
@@ -403,7 +424,7 @@ def main():
 
 def selftest():
     # every menu label routes to a real command
-    assert set(MENU_ACTIONS.values()) == {"quick", "run", "paper", "compare", "stats", "settings", "whales", "channel", "help"}
+    assert set(MENU_ACTIONS.values()) == {"quick", "run", "paper", "compare", "stats", "settings", "whales", "funding", "liq", "channel", "help"}
     cfg = dict(botconfig.DEFAULTS, top=50, scalp=False)
     text, kb = settings_view(cfg)
     flat = [b for row in kb["inline_keyboard"] for b in row]

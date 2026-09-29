@@ -17,10 +17,13 @@ DEFAULTS = {
     "news": True,        # разбор новостей через Jev
     "attention": True,   # Jev-подсказки «на что смотреть»
     "radar": True,       # фандинг-радар по всему рынку Bybit (1 запрос)
+    "fund_alerts": True, # ⚡ алерт на всплеск фандинга (live.py)
+    "fund_alert": 1.0,   # порог алерта: % за период монеты
+    "liq_alerts": True,  # 💥 алерт на каскад ликвидаций (live.py)
     "ta_limit": 30,      # на больших списках осцилляторы/scalp только по N подвижным
 }
 
-BOOL_KEYS = ["ta", "fng", "scalp", "listings", "news", "attention", "radar"]
+BOOL_KEYS = ["ta", "fng", "scalp", "listings", "news", "attention", "radar", "fund_alerts", "liq_alerts"]
 
 
 def load():

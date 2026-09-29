@@ -28,3 +28,4 @@ jobs:
           python3 channel.py
           python3 whales.py --selftest
           python3 study.py --selftest
+          python3 live.py --selftest
