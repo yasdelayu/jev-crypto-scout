@@ -29,3 +29,4 @@ jobs:
           python3 whales.py --selftest
           python3 study.py --selftest
           python3 live.py --selftest
+          python3 users.py

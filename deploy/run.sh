@@ -19,4 +19,4 @@ EXTRA=""
 if [ -n "${CHANNEL_ID:-}" ] && [ "$(date -u +%H)" = "04" ]; then
   EXTRA="--channel"
 fi
-exec python3 scout.py $ARGS --log --telegram $EXTRA
+exec python3 scout.py $ARGS --log --telegram --broadcast $EXTRA

@@ -224,14 +224,14 @@ def main():
                 conn.commit()
                 lines = fw.check(hits) if cfg.get("fund_alerts", True) else []
                 if lines:
-                    tn._send("\n".join(lines))
+                    tn.broadcast("\n".join(lines))
                 liq.flush(conn, int(now // 60) * 60)
             out = []
             while alerts:
                 a = alerts.popleft()
                 out.append(liq_line(a, moves.get(a["symbol"])))
             if out and cfg.get("liq_alerts", True):
-                tn._send("\n".join(out))
+                tn.broadcast("\n".join(out))
         except Exception as e:
             print(f"live loop error: {e!r}", file=sys.stderr, flush=True)
         time.sleep(2)

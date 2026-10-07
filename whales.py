@@ -190,7 +190,7 @@ def loop(every):
                 loaded = time.time()
             alerts = cycle(conn, whales)
             if alerts:
-                tn._send("\n".join(alerts))
+                tn.broadcast("\n".join(alerts))
         except Exception as e:
             print(f"whales cycle error: {e!r}", file=sys.stderr, flush=True)
         time.sleep(every)

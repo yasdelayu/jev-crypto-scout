@@ -401,6 +401,8 @@ if __name__ == "__main__":
                     help="дописать этот прогон в history.db (SQLite) — фундамент для validate.py")
     p.add_argument("--telegram", action="store_true",
                     help="отправить краткий дайджест в Telegram (нужны TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID)")
+    p.add_argument("--broadcast", action="store_true",
+                    help="с --telegram: слать сводку всем допущенным юзерам, а не только владельцу (прогон по расписанию)")
     p.add_argument("--radar", action="store_true",
                     help="+ фандинг-радар: самые высокие ставки по ВСЕМ перпам Bybit (1 запрос)")
     p.add_argument("--channel", action="store_true",
@@ -543,7 +545,7 @@ if __name__ == "__main__":
         try:
             telegram_notify.notify(ranked, judged=judged, scalp_results=scalp_results,
                                    context=context, listings_data=listings_data, priorities=priorities,
-                                   radar=radar)
+                                   radar=radar, everyone=args.broadcast)
             print("дайджест отправлен в Telegram")
         except Exception as e:
             print(f"не удалось отправить в Telegram: {e}", file=sys.stderr)

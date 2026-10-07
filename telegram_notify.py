@@ -40,7 +40,7 @@ def _post(text, chat_id=None, **extra):
                 disable_web_page_preview="true", **extra)
 
 
-def _send(text):
+def _send(text, chat_id=None):
     """Split on blank lines into <=TG_LIMIT chunks so a long digest (top-100 +
     news + listings + funding) never trips Telegram's 4096-char cap and gets
     silently rejected — the bug behind 'обрезанные новости'."""
@@ -54,7 +54,7 @@ def _send(text):
     if cur.strip():
         chunks.append(cur)
     for c in chunks:
-        _post(c.rstrip())
+        _post(c.rstrip(), chat_id=chat_id)
     return len(chunks)
 
 
@@ -162,13 +162,30 @@ def format_digest(ranked, judged=None, scalp_results=None, context=None, listing
     return "\n".join(lines)
 
 
-def notify(ranked, judged=None, scalp_results=None, context=None, listings_data=None, priorities=None, radar=None):
-    return _send(format_digest(ranked, judged, scalp_results, context, listings_data, priorities, radar=radar))
+def notify(ranked, judged=None, scalp_results=None, context=None, listings_data=None, priorities=None, radar=None,
+           everyone=False):
+    text = format_digest(ranked, judged, scalp_results, context, listings_data, priorities, radar=radar)
+    return broadcast(text) if everyone else _send(text)
 
 
-def send_text(text):
+def broadcast(text):
+    """Owner + every approved user with alerts on. One blocked/broken chat must
+    not stop the rest (403 = the user blocked the bot)."""
+    import sys
+    import users
+    sent = 0
+    for chat in users.recipients():
+        try:
+            _send(text, chat)
+            sent += 1
+        except Exception as e:
+            print(f"broadcast to {chat}: {e}", file=sys.stderr, flush=True)
+    return sent
+
+
+def send_text(text, chat_id=None):
     """Plain helper for the bot to answer commands."""
-    return _send(text)
+    return _send(text, chat_id)
 
 
 def selftest():
